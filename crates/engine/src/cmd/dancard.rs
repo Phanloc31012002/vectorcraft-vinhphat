@@ -30,7 +30,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "DanCard: Đọc khung transform",
             [],
             None,
-            "{ids?: [id…] (mặc định: vùng chọn), unit?: cm|mm|in|pt (mặc định cm)} → {unit, count, selection, objects: [{id, name, kind, …khung}]}; khung = {angle: độ ngược chiều kim đồng hồ, source: transform|detected|page, width, height (đo theo trục khung), center: [x, y], corners: [[x, y]×4] (trên trái, trên phải, dưới phải, dưới trái của khung), artboard: số thứ tự artboard chứa tâm | null, onArtboard?: {center, corners} so với góc trên trái artboard đó}. Đo phần NHÌN THẤY: clip group theo mask (giao với nội dung), group lồng nhau đi hết, bỏ object ẩn/guide/path không tô. Góc lấy từ VectorCraft khi object được xoay trong app (transform), không có thì tự dò từ hình dạng (detected) — dùng cho file .ai/PDF của khách",
+            "{ids?: [id…] (mặc định: vùng chọn), unit?: cm|mm|in|pt (mặc định cm), bounds?: preview|geometric (mặc định theo Use Preview Bounds, như bảng Transform)} → {unit, bounds, count, selection, objects: [{id, name, kind, …khung}]}; khung = {angle: độ ngược chiều kim đồng hồ, source: transform|page|detected, width, height (đo theo trục khung), center: [x, y] trên trang, rulerCenter: [x, y] theo thước (bằng X/Y của bảng Transform khi chọn điểm tâm), corners: [[x, y]×4], artboard: số thứ tự artboard chứa tâm | null, onArtboard?, transformBox? (khi detected: rộng, cao, tâm bảng Transform hiện)}. Khung đúng như bảng Transform đo: clip group theo mask, group lồng nhau đi hết. Riêng khi bảng Transform cho khung thẳng mà hình thật là chữ nhật đặt nghiêng (file .ai/PDF không lưu góc) thì trả khung dò được (detected)",
             has_doc,
             transform_info
         ),
@@ -218,46 +218,26 @@ fn mask_points(m: &Node, out: &mut Vec<Point>) {
     }
 }
 
-/// Các điểm đường viền của phần NHÌN THẤY: clip group lấy giao (bao lồi) của nội dung với mask,
-/// group lồng bao nhiêu tầng cũng đi hết; object ẩn, guide, path không tô bị bỏ qua.
-fn visible_points(n: &Node, out: &mut Vec<Point>) {
-    if !n.visible {
-        return;
-    }
+/// Các điểm đường viền đúng như khung transform đo (`Node::geometric_bounds`): clip group theo
+/// clipping path, group lồng bao nhiêu tầng cũng đi hết, layer bỏ con đang ẩn.
+fn outline_points(n: &Node, out: &mut Vec<Point>) {
     match &n.kind {
         NodeKind::Group { children, clip: true } | NodeKind::Layer { children, clip: true, .. } => {
-            let Some(m) = children.first() else { return };
-            let mut mask = Vec::new();
-            mask_points(m, &mut mask);
-            let mut inner = Vec::new();
-            for c in children.iter().skip(1) {
-                visible_points(c, &mut inner);
+            if let Some(m) = children.first() {
+                mask_points(m, out);
             }
-            let mask = convex_hull(mask);
-            let inner = convex_hull(inner);
-            let hit = clip_convex(&inner, &mask);
-            out.extend(if hit.len() >= 3 { hit } else { mask });
         }
-        NodeKind::Group { children, .. } | NodeKind::Layer { children, .. } => {
+        NodeKind::Layer { children, .. } => {
+            for c in children.iter().filter(|c| c.visible) {
+                outline_points(c, out);
+            }
+        }
+        NodeKind::Group { children, .. } | NodeKind::Compound { children, .. } => {
             for c in children {
-                visible_points(c, out);
+                outline_points(c, out);
             }
         }
-        NodeKind::Path { guide: true, .. } => {}
-        NodeKind::Path { path, .. } => {
-            if painted(n) {
-                push_path(path, out);
-            }
-        }
-        NodeKind::Compound { children, .. } => {
-            if painted(n) {
-                for c in children {
-                    if let NodeKind::Path { path, .. } = &c.kind {
-                        push_path(path, out);
-                    }
-                }
-            }
-        }
+        NodeKind::Path { path, .. } => push_path(path, out),
         NodeKind::Image(im) => {
             let r = Rect::new(0.0, 0.0, f64::from(im.width), f64::from(im.height));
             out.extend([Point::new(r.x0, r.y0), Point::new(r.x1, r.y0), Point::new(r.x1, r.y1), Point::new(r.x0, r.y1)].map(|p| im.xf * p));
@@ -300,43 +280,6 @@ fn convex_hull(mut pts: Vec<Point>) -> Vec<Point> {
     upper.pop();
     lower.extend(upper);
     lower
-}
-
-/// Giao của hai đa giác lồi (Sutherland–Hodgman, `clip` là đa giác cắt).
-fn clip_convex(subject: &[Point], clip: &[Point]) -> Vec<Point> {
-    if subject.len() < 3 || clip.len() < 3 {
-        return Vec::new();
-    }
-    // Chiều của đa giác cắt: điểm "bên trong" có cùng dấu với diện tích.
-    let area: f64 = clip.iter().zip(clip.iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum();
-    let sign = if area >= 0.0 { 1.0 } else { -1.0 };
-    let mut out: Vec<Point> = subject.to_vec();
-    for (i, &a) in clip.iter().enumerate() {
-        let Some(&b) = clip.get((i + 1) % clip.len()) else { break };
-        let input = std::mem::take(&mut out);
-        let inside = |p: Point| sign * cross(a, b, p) >= -1e-9;
-        let hit = |p: Point, q: Point| {
-            let (d1, d2) = (cross(a, b, p), cross(a, b, q));
-            let t = if (d1 - d2).abs() < 1e-12 { 0.0 } else { d1 / (d1 - d2) };
-            p.lerp(q, t)
-        };
-        for (j, &q) in input.iter().enumerate() {
-            let Some(&p) = input.get((j + input.len() - 1) % input.len()) else { continue };
-            match (inside(p), inside(q)) {
-                (true, true) => out.push(q),
-                (true, false) => out.push(hit(p, q)),
-                (false, true) => {
-                    out.push(hit(p, q));
-                    out.push(q);
-                }
-                (false, false) => {}
-            }
-        }
-        if out.is_empty() {
-            break;
-        }
-    }
-    out
 }
 
 /// Khung của các điểm `hull` khi trục x của khung đứng ở góc trang `phi` (radian, y hướng xuống).
@@ -424,54 +367,59 @@ fn detect_frame(points: Vec<Point>) -> Option<Frame> {
     Some(Frame { angle, width: w, height: h, center: c, source: "detected" })
 }
 
-/// Khung transform của `ids`: góc VectorCraft lưu (xoay trong app) nếu chúng cùng góc, không thì
-/// dò từ hình dạng phần nhìn thấy.
-fn frame_of(d: &Document, ids: &[NodeId]) -> Option<Frame> {
-    if d.bbox_angle(ids) != 0.0 {
-        let b = d.oriented_bounds(ids, false)?;
-        return Some(Frame { angle: b.angle, width: b.rect.width(), height: b.rect.height(), center: b.center(), source: "transform" });
+impl Frame {
+    /// Khung như bảng Transform hiện: `source` "transform" khi nó đứng nghiêng, "page" khi thẳng.
+    fn from_box(b: vectorcraft_doc::OrientedBox) -> Self {
+        let source = if b.angle != 0.0 { "transform" } else { "page" };
+        Frame { angle: b.angle, width: b.rect.width(), height: b.rect.height(), center: b.center(), source }
+    }
+}
+
+/// Khung transform của `ids`, đúng như bảng Transform đo (`visual`: Use Preview Bounds). Chỉ khi
+/// bảng Transform cho khung thẳng mà hình thật là chữ nhật đặt nghiêng (file .ai/PDF không lưu
+/// góc) thì dùng khung dò được.
+fn frame_of(d: &Document, ids: &[NodeId], visual: bool) -> Option<Frame> {
+    let boxed = Frame::from_box(d.oriented_bounds(ids, visual)?);
+    if boxed.angle != 0.0 {
+        return Some(boxed);
     }
     let mut pts = Vec::new();
     for id in ids {
         if let Some(n) = d.node(*id) {
-            visible_points(n, &mut pts);
+            outline_points(n, &mut pts);
         }
     }
-    if pts.is_empty() {
-        return d.bounds_of(ids, false).map(|r| Frame::upright(r, "page"));
-    }
-    detect_frame(pts)
+    Some(detect_frame(pts).filter(|f| f.source == "detected").unwrap_or(boxed))
 }
 
-/// Khung của cả vùng chọn: các object cùng một góc thì khung xoay theo góc đó (ôm hết), khác góc
-/// thì khung thẳng (như bảng Transform).
-fn selection_frame(each: &[Frame]) -> Option<Frame> {
-    let first = each.first()?;
+/// Khung của cả vùng chọn: đúng bảng Transform; riêng khi mọi object cùng một góc dò được thì
+/// khung xoay theo góc đó và ôm hết chúng.
+fn selection_frame(d: &Document, ids: &[NodeId], each: &[Frame], visual: bool) -> Option<Frame> {
+    let boxed = Frame::from_box(d.oriented_bounds(ids, visual)?);
+    let Some(first) = each.first() else { return Some(boxed) };
+    if boxed.angle != 0.0 || !each.iter().all(|f| f.source == "detected" && (f.angle - first.angle).abs() < 0.05) {
+        return Some(boxed);
+    }
     if each.len() == 1 {
         return Some(*first);
     }
-    let same = each.iter().all(|f| (f.angle - first.angle).abs() < 0.05);
     let mut pts = Vec::new();
     for f in each {
         pts.extend(f.corners());
     }
     let hull = convex_hull(pts);
-    let p0 = *hull.first()?;
-    if !same || first.angle == 0.0 {
-        let page = hull.iter().fold(Rect::from_points(p0, p0), |r, p| r.union_pt(*p));
-        return Some(Frame::upright(page, "page"));
-    }
-    let phi = -first.angle.to_radians();
-    let (_, w, h, c) = frame_at(&hull, phi);
-    Some(Frame { angle: first.angle, width: w, height: h, center: c, source: first.source })
+    let (_, w, h, c) = frame_at(&hull, -first.angle.to_radians());
+    Some(Frame { angle: first.angle, width: w, height: h, center: c, source: "detected" })
 }
 
 fn r4(v: f64) -> f64 {
     (v * 1e4).round() / 1e4
 }
 
-fn frame_json(d: &Document, f: &Frame, k: f64) -> Value {
+/// `transformBox`: khung bảng Transform hiện (để đối chiếu khi góc là dò được).
+fn frame_json(d: &Document, f: &Frame, transform_box: &Frame, k: f64) -> Value {
     let pt = |p: Point| json!([r4(p.x / k), r4(p.y / k)]);
+    let ruler = d.ruler_origin.to_vec2();
     let board = d.artboards.iter().position(|a| a.rect.contains(f.center));
     let mut v = json!({
         "angle": r4(f.angle),
@@ -479,9 +427,13 @@ fn frame_json(d: &Document, f: &Frame, k: f64) -> Value {
         "width": r4(f.width / k),
         "height": r4(f.height / k),
         "center": pt(f.center),
+        "rulerCenter": pt(f.center - ruler),
         "corners": f.corners().map(pt),
         "artboard": board,
     });
+    if f.source == "detected" {
+        v["transformBox"] = json!({"width": r4(transform_box.width / k), "height": r4(transform_box.height / k), "rulerCenter": pt(transform_box.center - ruler)});
+    }
     if let Some(a) = board.and_then(|i| d.artboards.get(i)) {
         let o = a.rect.origin().to_vec2();
         v["onArtboard"] = json!({"center": pt(f.center - o), "corners": f.corners().map(|p| pt(p - o))});
@@ -494,23 +446,37 @@ fn frame_json(d: &Document, f: &Frame, k: f64) -> Value {
 fn transform_info(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "dancard.transform";
     let (unit, k) = unit_param(p, C)?;
-    let ids = if p.get("ids").is_some() { checked_ids_param(s, p, "ids", C)? } else { roots_in_paint_order(s)? };
-    let d = &s.doc()?.doc;
+    // Như bảng Transform: Use Preview Bounds quyết định đo có viền hay không.
+    let visual = match str_param(p, "bounds") {
+        None => s.prefs.use_preview_bounds,
+        Some("preview") => true,
+        Some("geometric") => false,
+        Some(other) => return Err(bad(C, format!("bounds phải là preview hoặc geometric, không phải {other}"))),
+    };
+    let given = p.get("ids").is_some();
+    let ids = if given { checked_ids_param(s, p, "ids", C)? } else { roots_in_paint_order(s)? };
+    let st = s.doc()?;
+    let d = &st.doc;
+    // Vùng chọn đo đúng các object bảng Transform đo.
+    let selected: Vec<NodeId> = if given { ids.clone() } else { st.selection.objects.clone() };
     let mut frames = Vec::new();
     let mut objects = Vec::new();
     for id in &ids {
         let Some(n) = d.node(*id) else { continue };
-        let Some(f) = frame_of(d, &[*id]) else { continue };
-        let mut v = frame_json(d, &f, k);
+        let Some(f) = frame_of(d, &[*id], visual) else { continue };
+        let tb = d.oriented_bounds(&[*id], visual).map_or(f, Frame::from_box);
+        let mut v = frame_json(d, &f, &tb, k);
         v["id"] = json!(id.0);
         v["name"] = json!(n.display_name());
         v["kind"] = json!(n.kind_label());
         objects.push(v);
         frames.push(f);
     }
-    let selection = selection_frame(&frames).map_or(Value::Null, |f| frame_json(d, &f, k));
+    let selection = selection_frame(d, &selected, &frames, visual)
+        .map_or(Value::Null, |f| frame_json(d, &f, &d.oriented_bounds(&selected, visual).map_or(f, Frame::from_box), k));
     Ok(json!({
         "unit": unit,
+        "bounds": if visual { "preview" } else { "geometric" },
         "count": objects.len(),
         "selection": selection,
         "objects": objects,
@@ -633,7 +599,7 @@ fn clip_one(d: &mut Document, id: NodeId, w: f64, h: f64, follow_angle: bool) ->
     if matches!(n.kind, NodeKind::Layer { .. }) {
         return Err("không clip được cả layer".into());
     }
-    let oriented = if follow_angle { frame_of(d, &[id]).filter(|f| f.angle != 0.0) } else { None };
+    let oriented = if follow_angle { frame_of(d, &[id], false).filter(|f| f.angle != 0.0) } else { None };
     let (path, angle) = match oriented {
         Some(f) => {
             // Dựng mask trong hệ trục của khung đã xoay rồi đưa ra trang.
