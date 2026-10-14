@@ -51,12 +51,72 @@ pub(crate) struct Layout {
 }
 
 pub(crate) const LAYOUTS: &[Layout] = &[
-    Layout { key: "9.2x5.6", name: "9.2 x 5.6  (20 chỗ)", w: 92.0, h: 56.0, total: 20, divisors: &[1, 2, 4, 5, 10, 20], block_gap: None, send_to_back: false, voucher: false },
-    Layout { key: "9x5.5", name: "9 x 5.5  (20 chỗ)", w: 90.0, h: 55.0, total: 20, divisors: &[1, 2, 4, 5, 10, 20], block_gap: None, send_to_back: false, voucher: false },
-    Layout { key: "9.2x5.2", name: "9.2 x 5.2  (21 chỗ)", w: 92.0, h: 52.0, total: 21, divisors: &[1, 3, 7, 21], block_gap: Some(5.0), send_to_back: false, voucher: false },
-    Layout { key: "8.7x5.5", name: "8.7 x 5.5  (22 chỗ)", w: 87.0, h: 55.0, total: 22, divisors: &[1, 2, 11, 22], block_gap: Some(0.0), send_to_back: true, voucher: false },
-    Layout { key: "10.2x15.2", name: "10.2 x 15.2  (6 chỗ)", w: 152.0, h: 102.0, total: 6, divisors: &[1, 2, 3, 6], block_gap: None, send_to_back: false, voucher: false },
-    Layout { key: "15.2x7.2", name: "15.2 x 7.2  (voucher, 8 chỗ)", w: 152.0, h: 72.0, total: 8, divisors: &[1, 2, 4, 8], block_gap: None, send_to_back: false, voucher: true },
+    Layout {
+        key: "9.2x5.6",
+        name: "9.2 x 5.6  (20 chỗ)",
+        w: 92.0,
+        h: 56.0,
+        total: 20,
+        divisors: &[1, 2, 4, 5, 10, 20],
+        block_gap: None,
+        send_to_back: false,
+        voucher: false,
+    },
+    Layout {
+        key: "9x5.5",
+        name: "9 x 5.5  (20 chỗ)",
+        w: 90.0,
+        h: 55.0,
+        total: 20,
+        divisors: &[1, 2, 4, 5, 10, 20],
+        block_gap: None,
+        send_to_back: false,
+        voucher: false,
+    },
+    Layout {
+        key: "9.2x5.2",
+        name: "9.2 x 5.2  (21 chỗ)",
+        w: 92.0,
+        h: 52.0,
+        total: 21,
+        divisors: &[1, 3, 7, 21],
+        block_gap: Some(5.0),
+        send_to_back: false,
+        voucher: false,
+    },
+    Layout {
+        key: "8.7x5.5",
+        name: "8.7 x 5.5  (22 chỗ)",
+        w: 87.0,
+        h: 55.0,
+        total: 22,
+        divisors: &[1, 2, 11, 22],
+        block_gap: Some(0.0),
+        send_to_back: true,
+        voucher: false,
+    },
+    Layout {
+        key: "10.2x15.2",
+        name: "10.2 x 15.2  (6 chỗ)",
+        w: 152.0,
+        h: 102.0,
+        total: 6,
+        divisors: &[1, 2, 3, 6],
+        block_gap: None,
+        send_to_back: false,
+        voucher: false,
+    },
+    Layout {
+        key: "15.2x7.2",
+        name: "15.2 x 7.2  (voucher, 8 chỗ)",
+        w: 152.0,
+        h: 72.0,
+        total: 8,
+        divisors: &[1, 2, 4, 8],
+        block_gap: None,
+        send_to_back: false,
+        voucher: true,
+    },
 ];
 
 pub(super) fn specs() -> Vec<CommandSpec> {
@@ -276,7 +336,7 @@ fn mixed_slots(front: bool, c: Ctx, need_double: usize) -> (Vec<Slot>, Vec<Slot>
 // ---------------------------------------------------------------- đo
 
 /// Vùng nhìn thấy thật (visibleUnion của DanCard), không đo được thì khung hình học.
-fn vis(n: &Node) -> Option<Rect> {
+pub(super) fn vis(n: &Node) -> Option<Rect> {
     seen_bounds(n).or_else(|| n.visual_bounds()).or_else(|| n.geometric_bounds())
 }
 
@@ -313,7 +373,7 @@ fn columns(xs: &mut [f64], threshold: f64) -> usize {
 // ---------------------------------------------------------------- sửa trên tài liệu
 
 /// Xoay `id` `deg` độ (ngược chiều kim đồng hồ) quanh tâm vùng nhìn thấy.
-fn rotate_node(d: &mut Document, id: NodeId, deg: f64) {
+pub(super) fn rotate_node(d: &mut Document, id: NodeId, deg: f64) {
     if deg.rem_euclid(360.0) == 0.0 {
         return;
     }
@@ -324,7 +384,7 @@ fn rotate_node(d: &mut Document, id: NodeId, deg: f64) {
     }
 }
 
-fn translate_node(d: &mut Document, id: NodeId, by: vectorcraft_geom::Vec2) {
+pub(super) fn translate_node(d: &mut Document, id: NodeId, by: vectorcraft_geom::Vec2) {
     if by.hypot() < 1e-9 {
         return;
     }
@@ -334,7 +394,7 @@ fn translate_node(d: &mut Document, id: NodeId, by: vectorcraft_geom::Vec2) {
 }
 
 /// Bọc `id` trong clip group: mask `w` × `h` (pt) đặt tâm tại `c`.
-fn wrap_clip(d: &mut Document, id: NodeId, c: Point, w: f64, h: f64) -> Result<NodeId> {
+pub(super) fn wrap_clip(d: &mut Document, id: NodeId, c: Point, w: f64, h: f64) -> Result<NodeId> {
     let (parent, index, _) = d.position(id).ok_or(EngineError::NoNode(id))?;
     let mask_id = d.alloc_id();
     let path = shapes::rectangle(Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0));
@@ -350,7 +410,7 @@ fn wrap_clip(d: &mut Document, id: NodeId, c: Point, w: f64, h: f64) -> Result<N
 }
 
 /// Object › Expand Appearance trên `id` (giữ id).
-fn expand(d: &mut Document, id: NodeId) {
+pub(super) fn expand(d: &mut Document, id: NodeId) {
     let brushes = vectorcraft_brush::library(d);
     let mut out = vec![];
     crate::cmd::effectcmd::expand_node(d, id, &brushes, &mut out);
@@ -371,13 +431,23 @@ fn auto_clip(d: &mut Document, id: NodeId, w: f64, h: f64) -> Result<NodeId> {
 }
 
 /// Raster `id` trong vùng `region` (500 ppi, CMYK, nền trong suốt) và thay nó bằng ảnh.
-fn raster_in(d: &mut Document, id: NodeId, region: Rect) -> Result<NodeId> {
+pub(super) fn raster_in(d: &mut Document, id: NodeId, region: Rect) -> Result<NodeId> {
     let n = d.node(id).cloned().ok_or(EngineError::NoNode(id))?;
     let opts = RasterExportOptions { ppi: 500.0, background: None, anti_alias: vectorcraft_render::AntiAlias::Art, ..Default::default() };
     let inks = d.color_mode == vectorcraft_doc::ColorMode::Cmyk;
     let mut shown = n.clone();
     shown.visible = true;
-    let r = render_raster(d, vec![shown], region, Affine::IDENTITY, 500.0, Fit::Exact, &opts.render_options(RasterFormat::Png), &RasterEffectsSettings::default(), inks)?;
+    let r = render_raster(
+        d,
+        vec![shown],
+        region,
+        Affine::IDENTITY,
+        500.0,
+        Fit::Exact,
+        &opts.render_options(RasterFormat::Png),
+        &RasterEffectsSettings::default(),
+        inks,
+    )?;
     let img = image_node(d, r, n.name.clone(), 0.0);
     Ok(d.wrap(&[id], |_| img)?)
 }
@@ -422,7 +492,7 @@ fn auto_fix(d: &mut Document, id: NodeId, w: f64, h: f64, board: Rect) -> Option
 
 /// Các object cấp đầu (con trực tiếp của layer không khóa, đang hiện; không khóa, không ẩn) có tâm
 /// nằm trong `area`, trừ những object chứa thứ trong `keep`.
-fn top_level_in(d: &Document, area: Rect, keep: &[NodeId]) -> Vec<NodeId> {
+pub(super) fn top_level_in(d: &Document, area: Rect, keep: &[NodeId]) -> Vec<NodeId> {
     let mut out = vec![];
     for layer in d.layers.iter().filter(|l| !l.locked && l.visible) {
         for c in layer.children().into_iter().flatten() {
@@ -444,7 +514,7 @@ fn top_level_in(d: &Document, area: Rect, keep: &[NodeId]) -> Vec<NodeId> {
 }
 
 /// `id` nằm trong `ancestor` (ở mọi tầng).
-fn inside(d: &Document, id: NodeId, ancestor: NodeId) -> bool {
+pub(super) fn inside(d: &Document, id: NodeId, ancestor: NodeId) -> bool {
     let mut up = d.parent_of(id);
     while let Some(p) = up {
         if p == ancestor {
@@ -455,7 +525,7 @@ fn inside(d: &Document, id: NodeId, ancestor: NodeId) -> bool {
     false
 }
 
-fn union_of(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
+pub(super) fn union_of(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
     rects.fold(None, |acc: Option<Rect>, r| Some(acc.map_or(r, |a| a.union(r))))
 }
 
@@ -559,7 +629,7 @@ fn pon_doc(p: &Value) -> Result<Option<Document>> {
 }
 
 /// Lớp đang vẽ của tài liệu.
-fn active_layer(s: &Session) -> Option<NodeId> {
+pub(super) fn active_layer(s: &Session) -> Option<NodeId> {
     s.active().and_then(|st| st.current_layer())
 }
 
@@ -595,10 +665,7 @@ fn layout_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let two_sides = columns(&mut xs, 0.5 * layout.w * MM) >= 2;
     let n_models = if two_sides {
         if roots.len() % 2 != 0 {
-            return Err(EngineError::Other(format!(
-                "In 2 mặt cần số object chẵn (mỗi mẫu 2: trước+sau). Đang chọn {} object lẻ.",
-                roots.len()
-            )));
+            return Err(EngineError::Other(format!("In 2 mặt cần số object chẵn (mỗi mẫu 2: trước+sau). Đang chọn {} object lẻ.", roots.len())));
         }
         roots.len() / 2
     } else {

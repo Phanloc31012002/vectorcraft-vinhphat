@@ -2423,7 +2423,11 @@ mod tests {
         let symbols = st.doc.symbol_boxes();
         let bounds = node_outline(g, &symbols, true).bounding_box();
         assert!((bounds.x0 - 100.0).abs() < 0.01 && (bounds.x1 - 200.0).abs() < 0.01, "{bounds:?}");
-        assert_eq!(node_outline(st.doc.node(line).unwrap(), &symbols, true).bounding_box().x0, 50.0, "an isolated original still shows its full outline");
+        assert_eq!(
+            node_outline(st.doc.node(line).unwrap(), &symbols, true).bounding_box().x0,
+            50.0,
+            "an isolated original still shows its full outline"
+        );
     }
 
     #[test]
@@ -2471,7 +2475,8 @@ mod tests {
             let ctx = egui::Context::default();
             let mut out = ctx.run_ui(Default::default(), |ui| {
                 let painter = ui.painter().clone();
-                let xf = Xf { rect: egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), zoom: 1.0, center: Point::new(200.0, 150.0), rot: 0.0 };
+                let xf =
+                    Xf { rect: egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), zoom: 1.0, center: Point::new(200.0, 150.0), rot: 0.0 };
                 selection_overlay(app, &painter, &xf, false, tool);
             });
             out.textures_delta.clear();

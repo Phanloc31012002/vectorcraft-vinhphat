@@ -12,9 +12,9 @@ use vectorcraft_geom::{Affine, Rect};
 use vectorcraft_render::RenderOptions;
 use vectorcraft_render::encode::{RasterExportOptions, RasterFormat};
 
+use super::{frame_of, seen_bounds};
 use crate::cmd::fileio;
 use crate::cmd::menucmds::{MAX_PIXELS, isolated_doc, unique_key};
-use super::{frame_of, seen_bounds};
 use crate::cmd::*;
 use crate::{EngineError, Result, Session};
 
@@ -248,10 +248,7 @@ fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
     if cmyk == count {
         message.push_str(" Ảnh lưu CMYK, giữ đúng mực.");
     } else {
-        message.push_str(&format!(
-            " {} ảnh có chỗ trong suốt nên lưu PNG (màu chuyển sang CMYK khi xuất file in).",
-            count - cmyk
-        ));
+        message.push_str(&format!(" {} ảnh có chỗ trong suốt nên lưu PNG (màu chuyển sang CMYK khi xuất file in).", count - cmyk));
     }
     if !errors.is_empty() {
         message = format!("Raster được {count}/{total} object.\n{}\n{message}", errors.join("\n"));

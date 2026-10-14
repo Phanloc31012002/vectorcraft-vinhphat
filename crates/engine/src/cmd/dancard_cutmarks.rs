@@ -220,7 +220,12 @@ fn cut_marks(s: &mut Session, p: &Value) -> Result<Value> {
     let mut cards = vec![];
     let mut skipped = 0;
     for id in ids {
-        match d.node(id).and_then(card_bounds).filter(|b| b.width() > 0.0 && b.height() > 0.0).and_then(|b| Some(Card { b, board: artboard_for(d, b)? })) {
+        match d
+            .node(id)
+            .and_then(card_bounds)
+            .filter(|b| b.width() > 0.0 && b.height() > 0.0)
+            .and_then(|b| Some(Card { b, board: artboard_for(d, b)? }))
+        {
             Some(c) => cards.push(c),
             None => skipped += 1,
         }
@@ -236,7 +241,11 @@ fn cut_marks(s: &mut Session, p: &Value) -> Result<Value> {
     let (lines, duplicates) = plan_lines(d, &cards, length, gap, edge, &mut drawn);
     let count = cards.len();
     if lines.is_empty() {
-        let message = if duplicates > 0 { "Dấu cắt phù hợp đã tồn tại; không tạo nét trùng." } else { "Không có khoảng trống phù hợp để đặt dấu cắt." };
+        let message = if duplicates > 0 {
+            "Dấu cắt phù hợp đã tồn tại; không tạo nét trùng."
+        } else {
+            "Không có khoảng trống phù hợp để đặt dấu cắt."
+        };
         return Ok(json!({"message": format!("OK: {message}"), "drawn": 0, "cards": count, "skipped": skipped}));
     }
     let drawn_count = lines.len();

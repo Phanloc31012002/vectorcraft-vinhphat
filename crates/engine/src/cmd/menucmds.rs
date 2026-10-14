@@ -462,7 +462,17 @@ fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
     // stored as a CMYK TIFF.
     let inks = st.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk && look.color_model == RasterColorModel::Document;
     let finish = RasterEffectsSettings { color_model: look.color_model, ..Default::default() };
-    let r = super::dancard::render_raster(&st.doc, nodes, b, to_local, ppi, super::dancard::Fit::Grow, &raster.render_options(RasterFormat::Png), &finish, inks)?;
+    let r = super::dancard::render_raster(
+        &st.doc,
+        nodes,
+        b,
+        to_local,
+        ppi,
+        super::dancard::Fit::Grow,
+        &raster.render_options(RasterFormat::Png),
+        &finish,
+        inks,
+    )?;
     if roots.is_empty() {
         return Err(bad(C, "nothing selected"));
     }

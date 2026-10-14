@@ -20,12 +20,28 @@ use super::edit::selected_roots;
 use super::*;
 use crate::EngineError;
 
-#[path = "dancard_raster.rs"]
-mod raster;
+#[path = "dancard_autosave.rs"]
+mod autosave;
+#[path = "dancard_be.rs"]
+mod be;
+#[path = "dancard_catalogue.rs"]
+mod catalogue;
+#[path = "dancard_ctl.rs"]
+mod ctl;
 #[path = "dancard_cutmarks.rs"]
 mod cutmarks;
+#[path = "dancard_kts.rs"]
+mod kts;
 #[path = "dancard_layout.rs"]
 mod layout;
+#[path = "dancard_mau.rs"]
+mod mau;
+#[path = "dancard_raster.rs"]
+mod raster;
+#[path = "dancard_tutro.rs"]
+mod tutro;
+#[path = "dancard_variable.rs"]
+mod variable;
 pub(crate) use raster::{Fit, image_node, render_raster};
 
 /// Số point trong 1 cm.
@@ -74,6 +90,14 @@ pub fn specs() -> Vec<CommandSpec> {
     let mut v = raster::specs();
     v.extend(cutmarks::specs());
     v.extend(layout::specs());
+    v.extend(autosave::specs());
+    v.extend(catalogue::specs());
+    v.extend(kts::specs());
+    v.extend(tutro::specs());
+    v.extend(mau::specs());
+    v.extend(ctl::specs());
+    v.extend(be::specs());
+    v.extend(variable::specs());
     v.extend([
         cmd!(
             query "dancard.transform",
@@ -133,6 +157,25 @@ fn unit_param<'a>(p: &'a Value, cmd: &str) -> Result<(&'a str, f64)> {
     Ok((unit, size))
 }
 
+/// Cạnh lớn nhất nhận cho Rộng × Cao (pt): 10 m, đủ mọi khổ in; số lớn hơn là gõ nhầm và sẽ làm
+/// phẳng đường cong thành hàng triệu đoạn.
+const MAX_SIDE_PT: f64 = 10_000.0 * 72.0 / 25.4;
+
+/// Rộng × Cao (pt) từ tham số `width` / `height` theo đơn vị `k`, đã kiểm tra.
+fn size_param(p: &Value, cmd: &str, k: f64) -> Result<(f64, f64)> {
+    let (Some(w), Some(h)) = (number_param(p, "width"), number_param(p, "height")) else {
+        return Err(bad(cmd, "Thiếu kích thước Rộng x Cao."));
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return Err(bad(cmd, "Kích thước Rộng x Cao phải lớn hơn 0."));
+    }
+    let (wp, hp) = (w * k, h * k);
+    if !(wp <= MAX_SIDE_PT && hp <= MAX_SIDE_PT) {
+        return Err(bad(cmd, "Kích thước Rộng x Cao tối đa 1000 cm."));
+    }
+    Ok((wp, hp))
+}
+
 /// Số từ tham số: nhận số JSON hoặc chuỗi kiểu "9,2" (dấu phẩy thập phân như panel gửi).
 fn number_param(p: &Value, key: &str) -> Option<f64> {
     match p.get(key)? {
@@ -177,10 +220,12 @@ fn seen_bounds(n: &Node) -> Option<Rect> {
     if !n.visible {
         return None;
     }
-    let union = |nodes: &[std::sync::Arc<Node>]| nodes.iter().fold(None, |acc: Option<Rect>, c| match (acc, seen_bounds(c)) {
-        (Some(a), Some(b)) => Some(a.union(b)),
-        (a, b) => a.or(b),
-    });
+    let union = |nodes: &[std::sync::Arc<Node>]| {
+        nodes.iter().fold(None, |acc: Option<Rect>, c| match (acc, seen_bounds(c)) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (a, b) => a.or(b),
+        })
+    };
     match &n.kind {
         NodeKind::Group { children, clip: true } | NodeKind::Layer { children, clip: true, .. } => {
             let mask = children.first().and_then(|m| m.geometric_bounds());
@@ -514,7 +559,8 @@ fn frame_json(d: &Document, f: &Frame, transform_box: &Frame, k: f64) -> Value {
         "artboard": board,
     });
     if f.source == "detected" {
-        v["transformBox"] = json!({"width": r4(transform_box.width / k), "height": r4(transform_box.height / k), "rulerCenter": pt(transform_box.center - ruler)});
+        v["transformBox"] =
+            json!({"width": r4(transform_box.width / k), "height": r4(transform_box.height / k), "rulerCenter": pt(transform_box.center - ruler)});
     }
     if let Some(a) = board.and_then(|i| d.artboards.get(i)) {
         let o = a.rect.origin().to_vec2();
@@ -720,17 +766,12 @@ fn clip_one(d: &mut Document, id: NodeId, w: f64, h: f64, follow_angle: bool) ->
 fn clip_to_size(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "dancard.clipToSize";
     let (unit, k) = unit_param(p, C)?;
-    let (Some(w), Some(h)) = (number_param(p, "width"), number_param(p, "height")) else {
-        return Err(bad(C, "Thiếu kích thước Rộng x Cao."));
-    };
-    if w <= 0.0 || h <= 0.0 {
-        return Err(bad(C, "Kích thước Rộng x Cao phải lớn hơn 0."));
-    }
+    let (wp, hp) = size_param(p, C, k)?;
+    let (w, h) = (wp / k, hp / k);
     let ids = roots_in_paint_order(s)?;
     if ids.is_empty() {
         return Err(EngineError::Other("Hãy chọn ít nhất 1 object để clip.".into()));
     }
-    let (wp, hp) = (w * k, h * k);
     let follow_angle = bool_or(p, "followAngle", false);
     let total = ids.len();
     let (done, errors) = s.edit("Clip theo kích thước (DanCard)", |d, sel| {
@@ -802,12 +843,8 @@ fn resize_one(d: &mut Document, id: NodeId, w: f64, h: f64, visual: bool, sc: ve
 fn resize(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "dancard.resize";
     let (unit, k) = unit_param(p, C)?;
-    let (Some(w), Some(h)) = (number_param(p, "width"), number_param(p, "height")) else {
-        return Err(bad(C, "Thiếu kích thước Rộng x Cao."));
-    };
-    if w <= 0.0 || h <= 0.0 {
-        return Err(bad(C, "Kích thước Rộng x Cao phải lớn hơn 0."));
-    }
+    let (wp, hp) = size_param(p, C, k)?;
+    let (w, h) = (wp / k, hp / k);
     let ids = roots_in_paint_order(s)?;
     if ids.is_empty() {
         return Err(EngineError::Other("Hãy chọn ít nhất một object để resize.".into()));
@@ -819,7 +856,7 @@ fn resize(s: &mut Session, p: &Value) -> Result<Value> {
         let mut done = Vec::new();
         let mut errors = Vec::new();
         for (i, id) in ids.iter().enumerate() {
-            match resize_one(d, *id, w * k, h * k, visual, sc) {
+            match resize_one(d, *id, wp, hp, visual, sc) {
                 Ok(()) => done.push(*id),
                 Err(e) => errors.push(format!("Object {}: {e}", i + 1)),
             }

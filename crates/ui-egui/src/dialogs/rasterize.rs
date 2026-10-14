@@ -20,14 +20,8 @@ const CMD: &str = "object.rasterize";
 const RESOLUTIONS: [(f64, &str); 3] = [(72.0, "Screen (72 ppi)"), (150.0, "Medium (150 ppi)"), (300.0, "High (300 ppi)")];
 const USE_DOCUMENT: &str = "Use Document Raster Effects Resolution";
 
-pub(super) const SPEC: DialogSpec = DialogSpec {
-    heading: |_| tl!("Rasterize").into(),
-    body,
-    confirm,
-    min_width: 460.0,
-    max_width: Some(460.0),
-    ..DialogSpec::FORM
-};
+pub(super) const SPEC: DialogSpec =
+    DialogSpec { heading: |_| tl!("Rasterize").into(), body, confirm, min_width: 460.0, max_width: Some(460.0), ..DialogSpec::FORM };
 
 /// Open the dialog on the document's raster effects settings (`document.rasterEffectsSettings`).
 pub fn open(app: &mut VectorcraftApp) -> Result<Value, String> {

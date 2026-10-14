@@ -193,6 +193,12 @@ fn resize_card_nghieng_giu_tam_va_goc() {
     assert!(close(&f["angle"], 30.0) && close(&f["width"], 9.0) && close(&f["height"], 5.4), "{f}");
     assert!(close(&f["center"][0], before["center"][0].as_f64().unwrap()) && close(&f["center"][1], before["center"][1].as_f64().unwrap()));
     assert!(s.execute("dancard.resize", &json!({"width": 0, "height": 5})).is_err());
+    // Số gõ nhầm (1e12 cm) bị từ chối ngay, không làm phẳng đường cong thành hàng tỉ đoạn.
+    for id in ["dancard.resize", "dancard.clipToSize"] {
+        let e = s.execute(id, &json!({"width": 1e12, "height": 5})).unwrap_err().to_string();
+        assert!(e.contains("tối đa 1000 cm"), "{id}: {e}");
+    }
+    run(&mut s, "dancard.resize", json!({"width": 999, "height": 5}));
 }
 
 #[test]
@@ -304,4 +310,96 @@ fn dan_card_bao_loi_so_mau_va_sai_kho() {
     assert!(e.contains("Sai kích thước"), "{e}");
     assert_eq!(s.doc().unwrap().history.undo.len(), undo);
     assert!(s.execute("dancard.layout", &json!({"layout": "1x1"})).is_err());
+}
+
+#[test]
+fn auto_save_pdf_dat_ten_va_luu_dung_so_trang() {
+    let (mut s, ids) = card_sources(3, 1);
+    // Hàng 1: trước + sau; hàng 2: 1 mặt (cột trái). Dời mẫu thứ 2 sang phải cùng hàng với mẫu 1.
+    let mm = 72.0 / 25.4;
+    run(&mut s, "select.set", json!({"ids": [ids[1].0]}));
+    run(&mut s, "object.move", json!({"dx": 120.0 * mm, "dy": -80.0 * mm}));
+    run(&mut s, "select.set", json!({"ids": [ids[0].0, ids[1].0, ids[2].0]}));
+    let dry = run(&mut s, "dancard.autoSavePdf", json!({"prefix": "1088", "start": "7", "pad": "2", "boxes": "5, 10", "date": "14", "dryRun": true}));
+    assert_eq!(
+        dry["files"],
+        json!([
+            "1088 - 07 - 5 hop - cm - 14.pdf",
+            "1088 - 08 - 10 hop - cm - 14.pdf",
+            "1088 - 09 - 5 hop - 1 mat - cm - 14.pdf",
+            "1088 - 10 - 10 hop - 1 mat - cm - 14.pdf"
+        ]),
+        "{dry}"
+    );
+    assert_eq!((dry["oneSide"].as_u64(), dry["twoSides"].as_u64()), (Some(1), Some(1)));
+    let dir = std::env::temp_dir().join(format!("dancard-autosave-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = run(&mut s, "dancard.autoSavePdf", json!({"boxes": "5", "boxesInOrder": false, "date": "1", "folder": dir.to_string_lossy()}));
+    assert_eq!(out["saved"], json!(2), "{out}");
+    let two = std::fs::read(dir.join("1088 - 1 - 5 hop - cm - 1.pdf")).unwrap();
+    let one = std::fs::read(dir.join("1088 - 2 - 5 hop - 1 mat - cm - 1.pdf")).unwrap();
+    // Số trang: các đối tượng /Type /Page (không tính /Pages).
+    let pages = |b: &[u8]| {
+        let t = String::from_utf8_lossy(b).replace("/Type /Page", "/Type/Page");
+        t.match_indices("/Type/Page").filter(|(i, _)| t.as_bytes().get(i + 10) != Some(&b's')).count()
+    };
+    assert!(two.starts_with(b"%PDF") && one.starts_with(b"%PDF"));
+    assert_eq!((pages(&two), pages(&one)), (2, 1), "2 mặt: 2 trang; 1 mặt: 1 trang");
+    // Không ghi đè file có sẵn.
+    let again = s.execute("dancard.autoSavePdf", &json!({"boxes": "5", "date": "1", "folder": dir.to_string_lossy()})).unwrap_err().to_string();
+    assert!(again.contains("đã tồn tại"), "{again}");
+    let _ = std::fs::remove_dir_all(&dir);
+    // Ghép số hộp theo thứ tự cần đúng số lượng.
+    assert!(s.execute("dancard.autoSavePdf", &json!({"boxes": "5", "boxesInOrder": true, "dryRun": true})).is_err());
+}
+
+#[test]
+fn clip_card_tu_xoay_theo_object() {
+    let mm = 72.0 / 25.4;
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 600, "height": 600, "colorMode": "cmyk"}));
+    let tall = id_of(&run(&mut s, "shape.rectangle", json!({"x": 10, "y": 10, "width": 60.0 * mm, "height": 95.0 * mm})));
+    run(&mut s, "select.set", json!({"ids": [tall.0]}));
+    let out = run(&mut s, "dancard.clipCard", json!({}));
+    let g = NodeId(out["ids"][0].as_u64().unwrap());
+    let d = &s.doc().unwrap().doc;
+    let b = d.node(g).unwrap().geometric_bounds().unwrap();
+    assert!((b.width() / mm - 56.0).abs() < 1e-3 && (b.height() / mm - 92.0).abs() < 1e-3, "{b:?}");
+}
+
+#[test]
+fn catalogue_a4_mot_cuon_a5_hai_cuon_xoay() {
+    use super::catalogue::plan_for;
+    let a4 = plan_for(211.0, 299.0).unwrap();
+    assert_eq!((a4.copies, a4.rotate), (1, false));
+    let a5 = plan_for(148.0, 210.0).unwrap();
+    assert_eq!((a5.copies, a5.rotate), (2, true));
+    assert!(plan_for(300.0, 400.0).is_none());
+    // 4 trang A5 (vector) → 1 tờ, 2 mặt, mỗi mặt 2 cuốn.
+    let mm = 72.0 / 25.4;
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 800, "height": 800, "colorMode": "cmyk"}));
+    let mut ids = vec![];
+    for i in 0..4 {
+        let id =
+            id_of(&run(&mut s, "shape.rectangle", json!({"x": 10.0 + i as f64 * 160.0 * mm, "y": 10, "width": 148.0 * mm, "height": 210.0 * mm})));
+        run(&mut s, "paint.setStroke", json!({"none": true, "ids": [id.0]}));
+        ids.push(id.0);
+    }
+    run(&mut s, "select.set", json!({"ids": ids}));
+    let out = run(&mut s, "dancard.catalogue", json!({"width": "14,8", "height": "21", "coverNote": ""}));
+    assert_eq!((out["copies"].as_u64(), out["faces"].as_u64()), (Some(2), Some(2)), "{out}");
+    let d = &s.doc().unwrap().doc;
+    assert_eq!(d.artboards.len(), 2);
+    assert_eq!(out["groups"].as_array().unwrap().len(), 4);
+    for g in out["groups"].as_array().unwrap() {
+        let b = d.node(NodeId(g.as_u64().unwrap())).unwrap().geometric_bounds().unwrap();
+        // Cuốn đã xoay: rộng = cao trang, cao = 2 × rộng trang.
+        assert!((b.width() / mm - 210.0).abs() < 0.5 && (b.height() / mm - 296.0).abs() < 0.5, "{b:?}");
+    }
+    assert!(d.layers.iter().any(|l| l.name.as_deref() == Some("Pon Catalogue tu dong") && l.locked));
+    // Số trang không chia hết cho 4: báo lỗi.
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "select.set", json!({"ids": [ids[0], ids[1], ids[2]]}));
+    assert!(s.execute("dancard.catalogue", &json!({"width": 14.8, "height": 21})).is_err());
 }
