@@ -362,6 +362,10 @@ pub struct UiState {
     /// Engine preferences (Edit → Preferences), persisted alongside the UI state.
     #[serde(default)]
     pub engine_prefs: Value,
+    /// DanCard (Công cụ bình panel): the values typed in its fields (sizes, units, options),
+    /// kept from one session to the next.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub dancard: serde_json::Map<String, Value>,
     /// Color Guide panel: variation kind, steps and amount (Color Guide Options).
     #[serde(default)]
     pub color_guide: vectorcraft_color::harmony::GuideOptions,
@@ -712,6 +716,7 @@ impl Default for UiState {
             recent_fonts: vec![],
             favorite_fonts: vec![],
             engine_prefs: Value::Null,
+            dancard: Default::default(),
             color_guide: Default::default(),
             library_panel: None,
             flattener_preview: Default::default(),

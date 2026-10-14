@@ -862,6 +862,19 @@ pub struct Prefs {
     /// preferences keeps it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub import_matches: Vec<cmd::importmatches::ImportMatch>,
+    // DanCard (IN Vĩnh Phát). Off here, so VectorCraft behaves as upstream; the desktop app turns
+    // them on once, through `Prefs::apply_dancard_defaults`.
+    /// Units › every opened document takes Units › General (its own units are replaced).
+    pub force_document_units: bool,
+    /// Holding Ctrl (Cmd on macOS) is Direct Selection with every tool, the Selection tool too.
+    pub ctrl_direct_selection: bool,
+    /// The Selection tool and the other tools that don't edit anchors show the anchors of what is
+    /// selected (off: its outline only).
+    pub selection_tool_anchors: bool,
+    /// The version of the DanCard defaults applied to these preferences (0: never). Not a
+    /// Preferences dialog field.
+    #[serde(skip_serializing_if = "cmd::dancard_defaults_unset")]
+    pub dancard_defaults: u32,
 }
 
 impl Default for Prefs {
@@ -1008,6 +1021,10 @@ impl Default for Prefs {
             blend_options: None,
             perspective_widget: Default::default(),
             import_matches: vec![],
+            force_document_units: false,
+            ctrl_direct_selection: false,
+            selection_tool_anchors: true,
+            dancard_defaults: 0,
         }
     }
 }
@@ -1274,6 +1291,9 @@ impl Session {
         doc.limit_depth();
         Self::refresh_text_bounds(&mut doc);
         doc.adopt_guides();
+        if self.prefs.force_document_units {
+            doc.units = self.default_units();
+        }
         if self.active == Some(index) {
             // Pending tool work (typing, a drag) belongs to the content being thrown away.
             self.reset_tool_for_doc_switch();

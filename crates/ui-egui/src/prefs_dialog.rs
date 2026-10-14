@@ -75,6 +75,11 @@ pub fn restore(app: &mut VectorcraftApp) {
     if !GPU_PREFERENCES.iter().any(|(v, _)| *v == p.gpu_preference) {
         p.gpu_preference = Prefs::default().gpu_preference;
     }
+    // DanCard (IN Vĩnh Phát): mặc định của bản này (đơn vị cm, Ctrl là Direct Selection, Selection
+    // tool không hiện điểm neo), áp một lần lên tùy chọn đã lưu.
+    if p.dancard_defaults < vectorcraft_engine::cmd::DANCARD_DEFAULTS {
+        p.apply_dancard_defaults(None);
+    }
     app.session.apply_prefs(p);
 }
 

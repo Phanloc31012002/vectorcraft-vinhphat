@@ -437,8 +437,11 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         vec![]
     };
     if app.ui.view.edges && !revolve_edit {
-        hover_highlight(app, &painter, &xf);
-        selection_overlay(app, &painter, &xf, overlays.iter().any(|o| matches!(o, Overlay::CurvePoint { .. })));
+        // DanCard: Ctrl held shows the selection as the tool it lends (Direct Selection).
+        let ctrl_tool = ui.input(|i| i.modifiers.command).then(|| app.session.ctrl_tool()).flatten();
+        let shown_tool = ctrl_tool.unwrap_or_else(|| app.session.tool_id());
+        hover_highlight(app, &painter, &xf, shown_tool);
+        selection_overlay(app, &painter, &xf, overlays.iter().any(|o| matches!(o, Overlay::CurvePoint { .. })), shown_tool);
         if app.ui.view.text_threads {
             thread_overlay(app, &painter, &xf);
         }
@@ -1472,24 +1475,25 @@ fn panel_drop(app: &mut VectorcraftApp, ui: &Ui, resp: &egui::Response, xf: &Xf)
     }
 }
 
-fn hover_highlight(app: &VectorcraftApp, p: &egui::Painter, xf: &Xf) {
+/// `tool`: the tool the pointer acts with (the active one, or the one Ctrl lends).
+fn hover_highlight(app: &VectorcraftApp, p: &egui::Painter, xf: &Xf, tool: &str) {
     let Some(h) = app.hover_doc else { return };
     // Smart Guides › Object Highlighting: a Smart Guides display option, so it needs them on.
     if !app.ui.view.smart_guides || !app.session.prefs.object_highlighting {
         return;
     }
-    if app.session.tool_busy() || !matches!(app.session.tool_id(), "selection" | "directSelection" | "groupSelection") {
+    if app.session.tool_busy() || !matches!(tool, "selection" | "directSelection" | "groupSelection") {
         return;
     }
     let Some(st) = app.session.active() else { return };
     let Some(hit) = hit_at(app, h, xf.zoom) else { return };
-    let id = if app.session.tool_id() == "selection" { hit.top_object(st.isolation) } else { hit.leaf };
+    let id = if tool == "selection" { hit.top_object(st.isolation) } else { hit.leaf };
     if st.selection.contains(id) {
         return;
     }
     if let Some(n) = st.doc.node(id).filter(|n| !too_many_anchors([*n])) {
         let color = c32(st.doc.layer_color(id));
-        let masks_only = !vectorcraft_tools::catalog::edits_anchors(app.session.tool_id());
+        let masks_only = !vectorcraft_tools::catalog::edits_anchors(tool);
         stroke_path(p, &node_outline(n, &st.doc.symbol_boxes(), masks_only), xf, Stroke::new(1.5, color));
     }
 }
@@ -1739,10 +1743,11 @@ fn print_tiling_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf) {
 /// The print tiling's lines: a neutral grey that reads on the paper and on the pasteboard.
 const PRINT_TILING: Color32 = Color32::from_gray(96);
 
-fn selection_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf, curve_points_from_tool: bool) {
+/// `tool`: the tool the pointer acts with (the active one, or the one Ctrl lends).
+fn selection_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf, curve_points_from_tool: bool, tool: &'static str) {
     // The Selection tool's bounding box (rotated with the objects after a rotation). It hides while
     // a drag moves or resizes the selection, so only the art is seen going with the pointer (#712).
-    let show_box = app.session.tool_id() == "selection"
+    let show_box = tool == "selection"
         && !app.session.tool_transforming()
         && app.ui.view.bounding_box
         && app.session.active().is_some_and(|st| !st.selection.is_empty() && st.selection.anchors.is_empty());
@@ -1753,9 +1758,11 @@ fn selection_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf, curve
     let app = &*app;
     let Some(st) = app.session.active() else { return };
     let symbols = st.doc.symbol_boxes();
-    let tool = app.session.tool_id();
     let direct = vectorcraft_tools::catalog::edits_anchors(tool);
     let curvature = tool == "curvature";
+    // DanCard: the Selection tool (and the other tools that don't edit anchors) shows the
+    // selected paths without their anchors, unless Preferences › selectionToolAnchors.
+    let object_anchors = app.session.prefs.selection_tool_anchors;
     // Selection & Anchor Display › Size (1–7, 3 the default): anchors, handles and the bounding
     // box's handles a point bigger or smaller per step.
     let look = HandleLook::of(&app.session.prefs);
@@ -1803,6 +1810,10 @@ fn selection_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf, curve
             let NodeKind::Path { path, .. } = &c.kind else { return };
             // The Curvature tool owns its points while drawing; existing paths use this overlay.
             if curvature && curve_points_from_tool {
+                return;
+            }
+            // Whole objects selected with a tool that doesn't edit anchors: outlines only.
+            if !direct && partial.is_none() && !object_anchors {
                 return;
             }
             let selected_segments = st.selection.segments.get(&c.id);
@@ -2447,6 +2458,32 @@ mod tests {
         let symbols = st.doc.symbol_boxes();
         assert_eq!(node_outline(n, &symbols, true).bounding_box(), Rect::new(100.0, 100.0, 200.0, 150.0));
         assert_eq!(node_outline(n, &symbols, false).bounding_box(), Rect::new(0.0, 0.0, 400.0, 300.0));
+    }
+
+    /// DanCard: with Preferences › selectionToolAnchors off, the Selection tool shows a selected
+    /// path's outline without its anchors; Direct Selection (what Ctrl lends) still shows them.
+    #[test]
+    fn the_selection_tool_hides_anchors_when_asked() {
+        let mut app = VectorcraftApp::new(Session::new(), Default::default());
+        app.session.execute("file.new", &json!({"width": 400, "height": 300})).unwrap();
+        app.session.execute("shape.rectangle", &json!({"x": 10, "y": 10, "width": 100, "height": 50})).unwrap();
+        let shapes = |app: &mut VectorcraftApp, tool: &'static str| {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(Default::default(), |ui| {
+                let painter = ui.painter().clone();
+                let xf = Xf { rect: egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), zoom: 1.0, center: Point::new(200.0, 150.0), rot: 0.0 };
+                selection_overlay(app, &painter, &xf, false, tool);
+            });
+            out.textures_delta.clear();
+            out.shapes.iter().filter(|c| matches!(c.shape, Shape::Rect(_))).count()
+        };
+        app.session.prefs.selection_tool_anchors = true;
+        let with = shapes(&mut app, "selection");
+        app.session.prefs.selection_tool_anchors = false;
+        let without = shapes(&mut app, "selection");
+        let direct = shapes(&mut app, "directSelection");
+        assert!(with > without, "{with} > {without}");
+        assert!(direct > 0 && with - without >= 4, "the rectangle's 4 anchors: {with} - {without}");
     }
 
     /// One headless canvas frame on an 800 × 600 window.

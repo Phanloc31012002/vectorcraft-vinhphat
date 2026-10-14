@@ -352,6 +352,16 @@ pub const PREF_SPECS: &[PrefSpec] = &[
     // The W/H link of the Transform panel, the Properties panel and the Control bar
     p!("constrainProportions", "General", "Transform Panel", "Constrain Width and Height Proportions", bool),
     p!("singleCornerRadius", "General", "Transform Panel", "Single Corner Radius", bool),
+    // DanCard (IN Vĩnh Phát): Prefs::apply_dancard_defaults turns them on in the desktop app.
+    p!("forceDocumentUnits", "Units", "", "Mọi file mở ra đều dùng đơn vị General (DanCard)", bool),
+    p!("ctrlDirectSelection", "Selection & Anchor Display", "Selection", "Giữ Ctrl: tạm dùng Direct Selection với mọi tool (DanCard)", bool),
+    p!(
+        "selectionToolAnchors",
+        "Selection & Anchor Display",
+        "Anchor Points, Handle, and Bounding Box Display",
+        "Hiện điểm neo khi chọn bằng Selection tool (DanCard)",
+        bool
+    ),
 ];
 
 pub fn spec(key: &str) -> Option<&'static PrefSpec> {
@@ -622,6 +632,10 @@ fn reset(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let mut next = s.prefs.clone();
     next.reset(cat);
+    // DanCard: once its defaults were applied, they are what Reset goes back to.
+    if s.prefs.dancard_defaults > 0 {
+        next.apply_dancard_defaults(cat);
+    }
     s.apply_prefs(next);
     Ok(json!({ "prefs": s.prefs.to_json() }))
 }

@@ -66,6 +66,7 @@ pub mod print;
 pub mod print_presets;
 mod psd_options;
 pub mod raster_effects;
+pub mod rasterize;
 pub mod rearrange_artboards;
 pub mod recolor;
 mod recovery;
@@ -264,6 +265,7 @@ registry! {
     SwatchConflict: [swatch_conflict::KIND] => swatch_conflict::SPEC,
     FileInfo: [file_info::KIND] => file_info::SPEC,
     RasterEffectsSettings: [raster_effects::KIND] => raster_effects::SPEC,
+    Rasterize: [rasterize::KIND] => rasterize::SPEC,
     MissingLinks: [missing_links::KIND] => missing_links::SPEC,
     MissingFonts: [missing_fonts::KIND] => missing_fonts::SPEC,
     FindLinks: [find_links::KIND] => find_links::SPEC,

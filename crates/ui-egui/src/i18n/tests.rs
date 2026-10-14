@@ -1188,7 +1188,12 @@ pub fn message_literals() -> std::collections::BTreeSet<String> {
                 if name != "tests" {
                     stack.push(path);
                 }
-            } else if name.ends_with(".rs") && !name.starts_with("tests") && !(d == crates.join("ui-egui").join("src") && name == "control.rs") {
+            } else if name.ends_with(".rs")
+                && !name.starts_with("tests")
+                // DanCard: thông báo tiếng Việt của fork, không có trong bộ dịch.
+                && !name.starts_with("dancard")
+                && !(d == crates.join("ui-egui").join("src") && name == "control.rs")
+            {
                 // Control replies are English protocol data, never status-bar messages
                 // (see i18n's module contract). Engine messages are scanned in their own crates.
                 let text = std::fs::read_to_string(&path).unwrap_or_default();

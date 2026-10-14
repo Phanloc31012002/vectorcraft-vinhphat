@@ -440,10 +440,10 @@ fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let raster = RasterExportOptions { ppi, background, anti_alias, ..Default::default() };
     let pad = look.add_around;
-    let b = st.doc.bounds_of(&roots, true).ok_or_else(|| bad(C, "selection has no bounds"))?.inflate(pad, pad);
-    let scale = ppi / 72.0;
-    // Snap to whole pixels.
-    let region = Rect::new(b.x0, b.y0, b.x0 + (b.width() * scale).ceil().max(1.0) / scale, b.y0 + (b.height() * scale).ceil().max(1.0) / scale);
+    // DanCard: `followAngle` rasterizes a tilted selection along its transform box (the image is
+    // tilted with it, without empty corners); else the image stays upright.
+    let (to_local, angle) = if bool_or(p, "followAngle", false) { super::dancard::raster_axes(&st.doc, &roots) } else { (Affine::IDENTITY, 0.0) };
+    let b = super::dancard::local_bounds(&st.doc, &roots, to_local).ok_or_else(|| bad(C, "selection has no bounds"))?.inflate(pad, pad);
     let nodes: Vec<Node> = roots
         .iter()
         .filter_map(|id| st.doc.node(*id).cloned())
@@ -458,18 +458,17 @@ fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
         .then(|| vectorcraft_render::effects::clip_outline(&Node::group(NodeId(u64::MAX), nodes.iter().cloned().map(Arc::new).collect())))
         .flatten()
         .map(|(bp, rule)| (PathData::from_bezpath(&bp), rule));
-    let tmp = isolated_doc(&st.doc, nodes);
-    let (png, w, h) = render_png(&tmp, region, scale, &raster.render_options(RasterFormat::Png), look.color_model)?;
+    // A CMYK document's own colour model keeps its inks: an image without transparent pixels is
+    // stored as a CMYK TIFF.
+    let inks = st.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk && look.color_model == RasterColorModel::Document;
+    let finish = RasterEffectsSettings { color_model: look.color_model, ..Default::default() };
+    let r = super::dancard::render_raster(&st.doc, nodes, b, to_local, ppi, super::dancard::Fit::Grow, &raster.render_options(RasterFormat::Png), &finish, inks)?;
     if roots.is_empty() {
         return Err(bad(C, "nothing selected"));
     }
+    let (w, h) = (r.width, r.height);
     let id = s.edit("Rasterize", |d, sel| {
-        let key = unique_key(d, "raster");
-        d.images.insert(key.clone(), vectorcraft_doc::ImageBlob::new("image/png", png));
-        let id = d.alloc_id();
-        let xf = Affine::translate(region.origin().to_vec2()) * Affine::scale(1.0 / scale);
-        let mut node =
-            Node::new(id, NodeKind::Image(Box::new(ImageObject { key, width: w, height: h, xf, link: None, placement: Default::default() })));
+        let mut node = super::dancard::image_node(d, r, None, angle);
         if let Some((path, rule)) = clip {
             node = super::rasterfx::clip_group(d, path, rule, node);
         }

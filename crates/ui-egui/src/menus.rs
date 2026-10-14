@@ -3235,12 +3235,8 @@ pub fn invoke(app: &mut VectorcraftApp, id: &str, p: Value) {
     }
     // Rasterize…: its options, starting from the document's raster effects settings.
     if id == "object.rasterize" && p.as_object().is_none_or(|o| o.is_empty()) {
-        match app.session.execute("document.rasterEffectsSettings", &json!({})) {
-            Ok(v) => {
-                let params = json!({"ppi": v["resolution"], "colorModel": v["colorModel"], "background": v["background"], "antiAlias": if v["antiAlias"] == true { "art" } else { "none" }, "clippingMask": v["clippingMask"], "addAround": v["addAround"]});
-                let _ = app.run("ui.paramDialog", json!({"command": id, "label": "Rasterize", "params": params}));
-            }
-            Err(e) => app.status(e.to_string()),
+        if let Err(e) = crate::dialogs::rasterize::open(app) {
+            app.status(e);
         }
         return;
     }
@@ -3703,6 +3699,8 @@ pub fn menu_strings() -> std::collections::BTreeSet<String> {
     out.extend(crate::dialogs::FILM_GRAIN_FIELDS.iter().map(|(_, label, _)| label.to_string()));
     out.extend(crate::chrome::hint_strings().into_iter().map(str::to_string));
     out.remove("");
+    // DanCard: chữ tiếng Việt của fork, không có trong bộ dịch.
+    out.retain(|s| !crate::panels::dancard::is_fork_text(s));
     out
 }
 

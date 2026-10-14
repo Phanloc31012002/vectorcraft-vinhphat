@@ -801,6 +801,12 @@ impl Renderer {
         self.render_as(doc, w, h, view, opts, true).pixels
     }
 
+    /// [`Self::render`] as ink amounts (see [`Self::render_region_inks`]) through any `view`: the
+    /// DanCard Raster draws a tilted card along its own edges.
+    pub fn render_inks(&mut self, doc: &Document, width: u32, height: u32, view: Affine, opts: &RenderOptions) -> Vec<u8> {
+        self.render_as(doc, width, height, view, opts, true).pixels
+    }
+
     /// Render a single node (thumbnails, previews) fitted into `size`×`size` pixels.
     pub fn render_thumbnail(&mut self, doc: &Document, id: NodeId, size: u32) -> Option<Rendered> {
         self.render_node_thumbnail(doc, doc.node(id)?, size, None)

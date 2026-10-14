@@ -20,11 +20,61 @@ use super::edit::selected_roots;
 use super::*;
 use crate::EngineError;
 
+#[path = "dancard_raster.rs"]
+mod raster;
+#[path = "dancard_cutmarks.rs"]
+mod cutmarks;
+#[path = "dancard_layout.rs"]
+mod layout;
+pub(crate) use raster::{Fit, image_node, render_raster};
+
 /// Số point trong 1 cm.
 const PT_PER_CM: f64 = 72.0 / 2.54;
 
+// ---------------------------------------------------------------- mặc định của bản IN Vĩnh Phát
+
+/// Phiên bản bộ mặc định DanCard (tăng khi thêm mặc định mới; [`Prefs::apply_dancard_defaults`]).
+pub const DANCARD_DEFAULTS: u32 = 1;
+
+/// Cho serde: tùy chọn chưa từng nhận mặc định DanCard thì không ghi trường này.
+pub fn dancard_defaults_unset(v: &u32) -> bool {
+    *v == 0
+}
+
+/// Mặc định DanCard: (khóa tùy chọn, giá trị). Nét và chữ giữ point như Illustrator.
+fn dancard_values() -> [(&'static str, Value); 4] {
+    [
+        ("unitsGeneral", json!("centimeters")),
+        ("forceDocumentUnits", json!(true)),
+        ("ctrlDirectSelection", json!(true)),
+        ("selectionToolAnchors", json!(false)),
+    ]
+}
+
+impl crate::Prefs {
+    /// Áp mặc định của bản IN Vĩnh Phát: đơn vị cm cho mọi file mở ra, giữ Ctrl là Direct
+    /// Selection, Selection tool không hiện điểm neo. `category`: chỉ các tùy chọn của mục đó (như
+    /// Reset của mục), `None`: tất cả.
+    pub fn apply_dancard_defaults(&mut self, category: Option<&str>) {
+        let mut obj = self.to_json();
+        for (key, value) in dancard_values() {
+            let in_category = category.is_none_or(|c| prefscmds::spec(key).is_some_and(|sp| sp.category.eq_ignore_ascii_case(c)));
+            if in_category {
+                obj[key] = value;
+            }
+        }
+        obj["dancardDefaults"] = json!(DANCARD_DEFAULTS);
+        if let Ok(p) = serde_json::from_value(obj) {
+            *self = p;
+        }
+    }
+}
+
 pub fn specs() -> Vec<CommandSpec> {
-    vec![
+    let mut v = raster::specs();
+    v.extend(cutmarks::specs());
+    v.extend(layout::specs());
+    v.extend([
         cmd!(
             query "dancard.transform",
             "DanCard: Đọc khung transform",
@@ -52,7 +102,17 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             clip_to_size
         ),
-    ]
+        cmd!(
+            "dancard.resize",
+            "DanCard: Resize theo kích thước",
+            [],
+            None,
+            "{width, height, unit?: cm|mm|in|pt (mặc định cm), strokes?: bool (co giãn nét, mặc định theo Scale Strokes & Effects)} mỗi object đang chọn được co giãn thành đúng width × height đo theo khung transform của nó (như bảng Transform: clip group theo mask, card đặt nghiêng theo trục của card), giữ nguyên tâm, một bước hoàn tác → {message, ids, errors}",
+            has_selection,
+            resize
+        ),
+    ]);
+    v
 }
 
 // ---------------------------------------------------------------- đơn vị và tham số
@@ -162,7 +222,7 @@ impl Frame {
         Frame { angle: 0.0, width: r.width(), height: r.height(), center: r.center(), source }
     }
     /// Hệ trục của khung → trang (cùng quy ước với `OrientedBox::to_doc`).
-    fn to_doc(&self) -> Affine {
+    fn to_doc(self) -> Affine {
         Affine::rotate(-self.angle.to_radians())
     }
     /// Bốn góc trên trang: trên trái, trên phải, dưới phải, dưới trái của chính khung.
@@ -390,6 +450,28 @@ fn frame_of(d: &Document, ids: &[NodeId], visual: bool) -> Option<Frame> {
         }
     }
     Some(detect_frame(pts).filter(|f| f.source == "detected").unwrap_or(boxed))
+}
+
+/// Trục để raster `ids` theo khung transform (Object › Rasterize `followAngle`): (trang → hệ trục
+/// của khung, góc của khung). Khung thẳng: (Identity, 0).
+pub(crate) fn raster_axes(d: &Document, ids: &[NodeId]) -> (Affine, f64) {
+    match frame_of(d, ids, false) {
+        Some(f) if f.angle != 0.0 => (Affine::rotate_about(f.angle.to_radians(), f.center), f.angle),
+        _ => (Affine::IDENTITY, 0.0),
+    }
+}
+
+/// Hộp nhìn thấy của `ids` (viền tính cả, như Object › Rasterize đo) trong hệ trục `to_local`.
+pub(crate) fn local_bounds(d: &Document, ids: &[NodeId], to_local: Affine) -> Option<Rect> {
+    if to_local == Affine::IDENTITY {
+        return d.bounds_of(ids, true);
+    }
+    let symbols = d.symbol_boxes();
+    ids.iter().filter_map(|id| d.node(*id)).fold(None, |acc, n| {
+        let mut probe = n.clone();
+        probe.transform(to_local, vectorcraft_doc::Scaling { strokes: true, patterns: true, ..Default::default() });
+        vectorcraft_geom::union_opt(acc, probe.visual_bounds_with(&symbols))
+    })
 }
 
 /// Khung của cả vùng chọn: đúng bảng Transform; riêng khi mọi object cùng một góc dò được thì
@@ -680,6 +762,92 @@ fn clip_to_size(s: &mut Session, p: &Value) -> Result<Value> {
         "errors": errors,
     }))
 }
+
+// ---------------------------------------------------------------- resize
+
+/// Sai lệch kích thước chấp nhận sau khi resize (pt).
+const RESIZE_TOL: f64 = 0.01;
+
+/// Co giãn `id` thành `w` × `h` (pt) theo khung transform của nó, giữ tâm. Đo lại sau mỗi lần và
+/// bù tối đa hai lần (viền không co giãn, ảnh…), như DanCard.
+fn resize_one(d: &mut Document, id: NodeId, w: f64, h: f64, visual: bool, sc: vectorcraft_doc::Scaling) -> std::result::Result<(), String> {
+    for _ in 0..3 {
+        let f = frame_of(d, &[id], visual).ok_or("không đo được khung của object")?;
+        if !(f.width > 0.0 && f.height > 0.0) {
+            return Err("kích thước object không hợp lệ".into());
+        }
+        if (f.width - w).abs() <= RESIZE_TOL && (f.height - h).abs() <= RESIZE_TOL {
+            return Ok(());
+        }
+        let (sx, sy) = (w / f.width, h / f.height);
+        if !(sx.is_finite() && sy.is_finite()) {
+            return Err("không tính được tỉ lệ resize".into());
+        }
+        let a = f.angle.to_radians();
+        let c = f.center.to_vec2();
+        let m = Affine::translate(c) * Affine::rotate(-a) * Affine::scale_non_uniform(sx, sy) * Affine::rotate(a) * Affine::translate(-c);
+        let n = d.node_mut(id).ok_or("không còn trong tài liệu")?;
+        n.transform(m, sc);
+        // Co giãn dọc theo trục khung giữ nguyên góc, cả góc dò được của file .ai/PDF.
+        n.bbox_angle = f.angle;
+    }
+    let f = frame_of(d, &[id], visual).ok_or("không đo được khung của object")?;
+    if (f.width - w).abs() <= 1.0 && (f.height - h).abs() <= 1.0 {
+        Ok(())
+    } else {
+        Err("không thể đặt đúng kích thước cho object này".into())
+    }
+}
+
+fn resize(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "dancard.resize";
+    let (unit, k) = unit_param(p, C)?;
+    let (Some(w), Some(h)) = (number_param(p, "width"), number_param(p, "height")) else {
+        return Err(bad(C, "Thiếu kích thước Rộng x Cao."));
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return Err(bad(C, "Kích thước Rộng x Cao phải lớn hơn 0."));
+    }
+    let ids = roots_in_paint_order(s)?;
+    if ids.is_empty() {
+        return Err(EngineError::Other("Hãy chọn ít nhất một object để resize.".into()));
+    }
+    let visual = s.prefs.use_preview_bounds;
+    let sc = super::object::scaling(s, p);
+    let total = ids.len();
+    let (done, errors) = s.edit("Resize theo kích thước (DanCard)", |d, sel| {
+        let mut done = Vec::new();
+        let mut errors = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            match resize_one(d, *id, w * k, h * k, visual, sc) {
+                Ok(()) => done.push(*id),
+                Err(e) => errors.push(format!("Object {}: {e}", i + 1)),
+            }
+        }
+        if done.is_empty() {
+            return Err(EngineError::Other(format!("Không resize được object nào.\n{}", errors.join("\n"))));
+        }
+        sel.set(done.iter().copied());
+        Ok((done, errors))
+    })?;
+    let fmt = |v: f64| {
+        let t = format!("{v:.3}");
+        t.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let mut message = format!("Đã resize {}/{total} object thành {} x {} {unit}.", done.len(), fmt(w), fmt(h));
+    if !errors.is_empty() {
+        message = format!("{message}\n{}", errors.join("\n"));
+    }
+    Ok(json!({
+        "message": message,
+        "ids": done.iter().map(|g| g.0).collect::<Vec<_>>(),
+        "errors": errors,
+    }))
+}
+
+#[cfg(test)]
+#[path = "dancard_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {

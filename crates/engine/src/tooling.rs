@@ -101,10 +101,23 @@ impl Session {
     /// None for the selection tools themselves and the view tools.
     fn lent_tool(&self, id: &str) -> Option<&'static str> {
         use vectorcraft_tools::catalog::{edits_anchors, is_selection_tool};
+        // DanCard: Ctrl is Direct Selection for every other tool, the Selection tool too.
+        if self.prefs.ctrl_direct_selection {
+            return (!matches!(id, "directSelection" | "hand" | "zoom" | "rotateView")).then_some("directSelection");
+        }
         if is_selection_tool(id) || matches!(id, "hand" | "zoom" | "rotateView") {
             return None;
         }
         Some(self.last_selection_tool.unwrap_or(if edits_anchors(id) { "directSelection" } else { "selection" }))
+    }
+
+    /// DanCard: the tool the canvas shows the selection with while Ctrl is held, when Preferences ›
+    /// ctrlDirectSelection lends Direct Selection; `None` when holding Ctrl shows nothing else.
+    pub fn ctrl_tool(&self) -> Option<&'static str> {
+        if !self.prefs.ctrl_direct_selection || self.lender.is_some() {
+            return None;
+        }
+        self.lent_tool(self.tool.id())
     }
 
     /// A press with Cmd held (Ctrl elsewhere) and any other tool than a selection tool: the

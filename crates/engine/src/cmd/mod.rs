@@ -14,6 +14,7 @@ mod css;
 mod cut;
 // DanCard — Công cụ bình (IN Vĩnh Phát).
 mod dancard;
+pub use dancard::{DANCARD_DEFAULTS, dancard_defaults_unset};
 pub(crate) mod distortcmds;
 mod docinfo;
 mod docmenu;
