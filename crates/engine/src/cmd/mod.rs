@@ -12,6 +12,8 @@ pub mod colortheme;
 mod create;
 mod css;
 mod cut;
+// DanCard — Công cụ bình (IN Vĩnh Phát).
+mod dancard;
 pub(crate) mod distortcmds;
 mod docinfo;
 mod docmenu;
@@ -198,6 +200,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
     SPECS.get_or_init(|| {
         let mut v = Vec::new();
         v.extend(edit::specs());
+        v.extend(dancard::specs());
         v.extend(clipboard::specs());
         v.extend(recolor::specs());
         v.extend(fileio::specs());
