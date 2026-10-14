@@ -15,6 +15,7 @@ pub mod color;
 pub mod color_guide;
 pub mod color_themes;
 pub mod css_properties;
+pub mod dancard;
 pub mod doc_info;
 pub mod flattener_preview;
 pub mod glyphs;
@@ -150,6 +151,7 @@ pub fn show_icon_panel(app: &mut VectorcraftApp, ui: &mut Ui, id: &str) {
         "history" => history::show(app, ui),
         "actions" => actions::show(app, ui),
         "info" => info::show(app, ui),
+        dancard::ID => dancard::show(app, ui),
         "separations" => separations::show(app, ui),
         "artboards" => artboards::show(app, ui),
         "gradient" => gradient::show(app, ui),
