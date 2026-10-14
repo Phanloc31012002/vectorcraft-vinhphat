@@ -139,6 +139,8 @@ pub const ICON_PANELS: &[(&str, &str, &str)] = &[
     (crate::panels::asset_export::ID, "Asset Export", "share-2"),
     (crate::panels::css_properties::ID, "CSS Properties", "globe"),
     (crate::panels::variables::ID, "Variables", "chart-column"),
+    // DanCard (IN Vĩnh Phát).
+    (crate::panels::dancard::ID, "Công cụ bình", "dc-transform-panel"),
 ];
 
 /// Groups of icon panels separated by dividers in the collapsed column.
@@ -156,6 +158,7 @@ pub const ICON_PANEL_GROUPS: &[&[&str]] = &[
     &["character", "paragraph", "glyphs"],
     &["history", "actions", "info", "navigator"],
     &["variables"],
+    &["dancard"],
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
