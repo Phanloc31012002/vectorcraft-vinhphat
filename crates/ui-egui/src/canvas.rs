@@ -1288,10 +1288,11 @@ fn c32(rgb: [u8; 3]) -> Color32 {
 }
 
 /// Outline of a node for highlighting (paths, compound children, area type frames, other
-/// text/image bounds, symbol instances' bounds measured by their art from `symbols`).
-fn node_outline(n: &Node, symbols: &SymbolBoxes) -> BezPath {
+/// text/image bounds, symbol instances' bounds measured by their art from `symbols`). `masks_only`:
+/// a clip group shows its clipping path only ([`walk_drawn`]).
+fn node_outline(n: &Node, symbols: &SymbolBoxes, masks_only: bool) -> BezPath {
     let mut bp = BezPath::new();
-    walk_drawn(n, &mut |c| match &c.kind {
+    walk_drawn(n, masks_only, &mut |c| match &c.kind {
         NodeKind::Path { path, .. } => bp.extend(path.to_bezpath()),
         // Area type shows its frame: the type area Direct Selection reshapes; type on a path its
         // path, which the selection tools' brackets sit on.
@@ -1351,14 +1352,22 @@ fn too_many_anchors<'a>(nodes: impl IntoIterator<Item = &'a Node>) -> bool {
 }
 
 /// [`Node::walk`] over what a selection highlight shows: an envelope's content is left out (the
-/// envelope shows its mesh instead).
-fn walk_drawn<'a>(n: &'a Node, f: &mut impl FnMut(&'a Node)) {
+/// envelope shows its mesh instead). With `masks_only` (the Selection and Group Selection tools), a
+/// clip group shows only its clipping path, not the outlines and anchors of the art it hides, as in
+/// Illustrator (DanCard, IN Vĩnh Phát); the tools that edit anchors still show everything.
+fn walk_drawn<'a>(n: &'a Node, masks_only: bool, f: &mut impl FnMut(&'a Node)) {
     f(n);
     if matches!(n.kind, NodeKind::Envelope { .. }) {
         return;
     }
+    if masks_only && n.clips() {
+        if let Some(mask) = n.children().and_then(|c| c.first()) {
+            walk_drawn(mask, masks_only, f);
+        }
+        return;
+    }
     for c in n.children().into_iter().flatten().skip(usize::from(n.extras().shaper.is_some())) {
-        walk_drawn(c, f);
+        walk_drawn(c, masks_only, f);
     }
 }
 
@@ -1480,7 +1489,8 @@ fn hover_highlight(app: &VectorcraftApp, p: &egui::Painter, xf: &Xf) {
     }
     if let Some(n) = st.doc.node(id).filter(|n| !too_many_anchors([*n])) {
         let color = c32(st.doc.layer_color(id));
-        stroke_path(p, &node_outline(n, &st.doc.symbol_boxes()), xf, Stroke::new(1.5, color));
+        let masks_only = !vectorcraft_tools::catalog::edits_anchors(app.session.tool_id());
+        stroke_path(p, &node_outline(n, &st.doc.symbol_boxes(), masks_only), xf, Stroke::new(1.5, color));
     }
 }
 
@@ -1764,7 +1774,7 @@ fn selection_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf, curve
         let outline = if too_many_anchors([n]) {
             n.geometric_bounds_with(&symbols).map(|b| vectorcraft_geom::shapes::rectangle(b).to_bezpath())
         } else {
-            Some(node_outline(n, &symbols))
+            Some(node_outline(n, &symbols, !direct))
         };
         if let Some(bp) = outline {
             stroke_path(p, &bp, xf, Stroke::new(KEY_OUTLINE, c32(st.doc.layer_color(k))));
@@ -1775,10 +1785,10 @@ fn selection_overlay(app: &mut VectorcraftApp, p: &egui::Painter, xf: &Xf, curve
         let color = c32(st.doc.layer_color(*id));
         let partial = st.selection.partial(*id);
         // Path outlines.
-        stroke_path(p, &node_outline(n, &symbols), xf, Stroke::new(1.0, color));
+        stroke_path(p, &node_outline(n, &symbols, !direct), xf, Stroke::new(1.0, color));
         // Anchors (and handles for selected anchors in direct mode); a gradient mesh's or a mesh
         // envelope's points.
-        walk_drawn(n, &mut |c| {
+        walk_drawn(n, !direct, &mut |c| {
             let envelope = vectorcraft_doc::live::envelope_overlay(c).and_then(|(_, grid)| grid);
             let grid = match &c.kind {
                 NodeKind::Mesh(m) => Some(m),
@@ -2400,9 +2410,9 @@ mod tests {
         let g = st.doc.node(st.selection.objects[0]).unwrap();
         assert!(g.extras().shaper.is_some());
         let symbols = st.doc.symbol_boxes();
-        let bounds = node_outline(g, &symbols).bounding_box();
+        let bounds = node_outline(g, &symbols, true).bounding_box();
         assert!((bounds.x0 - 100.0).abs() < 0.01 && (bounds.x1 - 200.0).abs() < 0.01, "{bounds:?}");
-        assert_eq!(node_outline(st.doc.node(line).unwrap(), &symbols).bounding_box().x0, 50.0, "an isolated original still shows its full outline");
+        assert_eq!(node_outline(st.doc.node(line).unwrap(), &symbols, true).bounding_box().x0, 50.0, "an isolated original still shows its full outline");
     }
 
     #[test]
@@ -2419,7 +2429,24 @@ mod tests {
                 inst = Some(n);
             }
         });
-        assert_eq!(node_outline(inst.unwrap(), &st.doc.symbol_boxes()).bounding_box(), Rect::new(20.0, 30.0, 40.0, 50.0));
+        assert_eq!(node_outline(inst.unwrap(), &st.doc.symbol_boxes(), true).bounding_box(), Rect::new(20.0, 30.0, 40.0, 50.0));
+    }
+
+    /// DanCard: chọn clip group bằng Selection tool chỉ hiện đường clipping path, không hiện viền
+    /// của phần bị mask che (như Illustrator); Direct Selection vẫn hiện hết để sửa điểm.
+    #[test]
+    fn a_selected_clip_group_shows_only_its_clipping_path() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let art = s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 400, "height": 300})).unwrap()["id"].clone();
+        let mask = s.execute("shape.rectangle", &json!({"x": 100, "y": 100, "width": 100, "height": 50})).unwrap()["id"].clone();
+        s.execute("select.set", &json!({"ids": [art, mask]})).unwrap();
+        let g = vectorcraft_doc::NodeId(s.execute("object.clippingMask.make", &json!({})).unwrap()["id"].as_u64().unwrap());
+        let st = s.active().unwrap();
+        let n = st.doc.node(g).unwrap();
+        let symbols = st.doc.symbol_boxes();
+        assert_eq!(node_outline(n, &symbols, true).bounding_box(), Rect::new(100.0, 100.0, 200.0, 150.0));
+        assert_eq!(node_outline(n, &symbols, false).bounding_box(), Rect::new(0.0, 0.0, 400.0, 300.0));
     }
 
     /// One headless canvas frame on an 800 × 600 window.
