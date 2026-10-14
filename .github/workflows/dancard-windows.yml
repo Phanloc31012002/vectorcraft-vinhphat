@@ -1,0 +1,40 @@
+# DanCard (IN Vĩnh Phát): build bản Windows x64 của fork có lệnh dancard.*.
+# Chạy tay ở tab Actions (Run workflow) hoặc tự chạy khi push lên nhánh `dancard`.
+# Kết quả: artifact `dancard-vectorcraft-windows-x64` chứa vectorcraft-<ver>-windows-x64-portable.zip
+# (vectorcraft.exe + vectorcraft-cli.exe) và bản cài .msi, chưa ký số (fork không có chứng chỉ).
+# Các bước chép từ job `windows` của release.yml upstream, bỏ phần ký số và font CJK.
+name: DanCard Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dancard]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dancard-windows-x64
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+      - name: Build and package (unsigned)
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Arch x64
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dancard-vectorcraft-windows-x64
+          path: dist/release/*
+          if-no-files-found: error
