@@ -15,15 +15,16 @@ xung đột.
 
 ### Cách `dancard.transform` đo
 
-- Đo **phần nhìn thấy**: clip group lấy theo mask (giao với nội dung), group lồng bao nhiêu tầng cũng
-  đi hết. Không phải dò clip cha/con, group cha/con trong tool nữa.
-- Bỏ qua object ẩn, guide, path không tô.
+- **Khớp bảng Transform**: rộng, cao, góc và tâm X/Y theo thước bằng đúng số bảng Transform hiện,
+  với điểm tham chiếu ở tâm. Clip group đo theo khung mask, group lồng bao nhiêu tầng cũng đúng,
+  không phải dò clip cha/con hay group cha/con trong tool nữa. Use Preview Bounds bật thì đo cả viền.
 - **Góc xoay**:
-  - `transform`: object được xoay ngay trong VectorCraft, nên lấy góc VectorCraft lưu (chính xác tuyệt đối).
-  - `detected`: file .ai/PDF/SVG không lưu góc, nên tự dò từ hình dạng. Lấy khung chữ nhật nhỏ nhất ôm
-    phần nhìn thấy. Chỉ nhận góc khi hình có cạnh thẳng nằm sát khung (từ 80% chu vi trở lên): card,
-    tem, khung clip. Dòng chữ hay nhóm object rời rạc thì giữ khung thẳng.
-  - `page`: khung thẳng.
+  - `transform`: object được xoay ngay trong VectorCraft, nên lấy đúng góc VectorCraft lưu.
+  - `detected`: bảng Transform cho khung thẳng, nhưng hình thật là chữ nhật đặt nghiêng (file .ai/PDF
+    không lưu góc). Khi đó trả khung chữ nhật nhỏ nhất ôm hình, kèm `transformBox` là số bảng Transform
+    hiện để đối chiếu. Chỉ nhận góc khi cạnh thẳng của hình phủ ít nhất 80% chu vi khung (card, tem,
+    khung clip). Dòng chữ hay nhóm object rời rạc thì giữ khung thẳng.
+  - `page`: khung thẳng, bằng đúng bảng Transform.
 - Góc dò được đưa về khoảng (-45°, 45°]. Card xoay đúng 90° sẽ đọc là khung thẳng 5,6 × 9,2.
 
 ### Gọi lệnh
