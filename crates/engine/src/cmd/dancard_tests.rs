@@ -234,6 +234,236 @@ fn dau_cat_tu_dong_tam_net_va_khong_ve_trung() {
     assert!(s.execute("dancard.cutMarks", &json!({"length": 0})).is_err());
 }
 
+/// Chữ nhật `w` × `h` pt ở (`x`, `y`), không viền.
+fn plain_rect(s: &mut Session, x: f64, y: f64, w: f64, h: f64) -> NodeId {
+    let id = id_of(&run(s, "shape.rectangle", json!({"x": x, "y": y, "width": w, "height": h})));
+    run(s, "paint.setStroke", json!({"none": true, "ids": [id.0]}));
+    id
+}
+
+/// `content` cắt theo chữ nhật `mask` (x, y, rộng, cao) → id của clip group.
+fn clip_to(s: &mut Session, content: NodeId, mask: (f64, f64, f64, f64)) -> NodeId {
+    let m = plain_rect(s, mask.0, mask.1, mask.2, mask.3);
+    run(s, "select.set", json!({"ids": [content.0, m.0]}));
+    run(s, "object.clippingMask.make", json!({}));
+    s.doc().unwrap().selection.objects[0]
+}
+
+fn group_of(s: &mut Session, ids: &[NodeId]) -> NodeId {
+    run(s, "select.set", json!({"ids": ids.iter().map(|i| i.0).collect::<Vec<_>>()}));
+    id_of(&run(s, "object.group", json!({})))
+}
+
+/// Card 100 × 60 pt ở (`x`, `y`) như file thiết kế: group gồm nền, ảnh đã clip và logo đã clip.
+fn designed_card(s: &mut Session, x: f64, y: f64) -> NodeId {
+    let bg = plain_rect(s, x, y, 100.0, 60.0);
+    let photo = plain_rect(s, x + 5.0, y + 5.0, 60.0, 50.0);
+    let photo = clip_to(s, photo, (x + 10.0, y + 10.0, 40.0, 40.0));
+    let logo = plain_rect(s, x + 70.0, y + 10.0, 30.0, 30.0);
+    let logo = clip_to(s, logo, (x + 72.0, y + 12.0, 20.0, 20.0));
+    group_of(s, &[bg, photo, logo])
+}
+
+fn cut_marks_on(s: &mut Session, ids: &[NodeId]) -> Value {
+    run(s, "select.set", json!({"ids": ids.iter().map(|i| i.0).collect::<Vec<_>>()}));
+    run(s, "dancard.cutMarks", json!({"length": "2", "gap": "1"}))
+}
+
+/// Nét `m` (khung của nó) nằm ở một góc của bài `card` (x0, y0, x1, y1): trên đường thẳng của một
+/// cạnh qua góc đó, cách góc không quá `reach` (cách bài + dài nét).
+fn mark_at_corner(m: vectorcraft_geom::Rect, card: [f64; 4], reach: f64) -> bool {
+    let [x0, y0, x1, y1] = card;
+    let e = 1e-6;
+    [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].iter().any(|&(cx, cy)| {
+        let horizontal = (m.y0 - cy).abs() < e && (m.y1 - cy).abs() < e && m.x0 >= cx - reach - e && m.x1 <= cx + reach + e;
+        let vertical = (m.x0 - cx).abs() < e && (m.x1 - cx).abs() < e && m.y0 >= cy - reach - e && m.y1 <= cy + reach + e;
+        horizontal || vertical
+    })
+}
+
+/// Cách bài 1 mm + dài nét 2 mm của [`cut_marks_on`] (pt).
+const MARK_REACH: f64 = 3.0 * 72.0 / 25.4;
+
+fn sheet_doc() -> Session {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 600, "height": 400, "colorMode": "cmyk"}));
+    s
+}
+
+/// Dấu cắt theo khối: group hay clip group là một bài, không đánh quanh chi tiết bên trong; tờ /
+/// hàng đã dàn (group chỉ gồm các khối đặt rời nhau) thì mỗi khối một bài.
+#[test]
+fn dau_cat_theo_khoi_group_va_clip() {
+    // Card là group có ảnh và logo đã clip: một bài, 8 nét ở bốn góc card, không nét nào trong card.
+    // (DanCard trên Illustrator tách group có từ 2 clip group con, nên đánh quanh ảnh và logo.)
+    let mut s = sheet_doc();
+    let card = designed_card(&mut s, 100.0, 100.0);
+    let out = cut_marks_on(&mut s, &[card]);
+    assert_eq!((out["cards"].as_u64(), out["drawn"].as_u64()), (Some(1), Some(8)), "{out}");
+    let d = &s.doc().unwrap().doc;
+    for m in d.layers.last().unwrap().children().unwrap() {
+        let b = m.geometric_bounds().unwrap();
+        assert!(mark_at_corner(b, [100.0, 100.0, 200.0, 160.0], MARK_REACH), "nét ở góc card: {b:?}");
+        assert!(!(b.x0 > 100.0 + 1e-6 && b.x1 < 200.0 - 1e-6 && b.y0 > 100.0 + 1e-6 && b.y1 < 160.0 - 1e-6), "{b:?}");
+    }
+
+    // Hai group chồng lên nhau (nền và phần chữ) gom thành card: vẫn một bài.
+    let mut s = sheet_doc();
+    let back = plain_rect(&mut s, 100.0, 100.0, 100.0, 60.0);
+    let back = group_of(&mut s, &[back]);
+    let text = plain_rect(&mut s, 120.0, 120.0, 40.0, 10.0);
+    let text = group_of(&mut s, &[text]);
+    let card = group_of(&mut s, &[back, text]);
+    assert_eq!(cut_marks_on(&mut s, &[card])["cards"], json!(1));
+
+    // Tờ đã dàn gồm 3 card như trên đặt cạnh nhau, nền tràn lề chồng nhau 3 pt: mỗi card một bài.
+    let mut s = sheet_doc();
+    let cards: Vec<NodeId> = (0..3).map(|i| designed_card(&mut s, 50.0 + f64::from(i) * 97.0, 100.0)).collect();
+    let sheet = group_of(&mut s, &cards);
+    assert_eq!(cut_marks_on(&mut s, &[sheet])["cards"], json!(3));
+    // Chọn từng card thay cho cả tờ: như vậy.
+    let mut s = sheet_doc();
+    let cards: Vec<NodeId> = (0..3).map(|i| designed_card(&mut s, 50.0 + f64::from(i) * 100.0, 100.0)).collect();
+    assert_eq!(cut_marks_on(&mut s, &cards)["cards"], json!(3));
+
+    // Tờ gồm 2 hàng (group), mỗi hàng 2 card đã clip như Dàn card (ảnh tràn lề): 4 bài, nét ngoài
+    // khung các mask, không nét nào trong tờ.
+    let mut s = sheet_doc();
+    let mut rows = vec![];
+    for r in 0..2 {
+        let mut row = vec![];
+        for c in 0..2 {
+            let (x, y) = (100.0 + f64::from(c) * 100.0, 100.0 + f64::from(r) * 60.0);
+            let art = plain_rect(&mut s, x - 5.0, y - 5.0, 110.0, 70.0);
+            row.push(clip_to(&mut s, art, (x, y, 100.0, 60.0)));
+        }
+        rows.push(group_of(&mut s, &row));
+    }
+    let sheet = group_of(&mut s, &rows);
+    let out = cut_marks_on(&mut s, &[sheet]);
+    assert_eq!(out["cards"], json!(4), "{out}");
+    let d = &s.doc().unwrap().doc;
+    for m in d.layers.last().unwrap().children().unwrap() {
+        let b = m.geometric_bounds().unwrap();
+        assert!(b.x1 <= 100.0 + 1e-6 || b.x0 >= 300.0 - 1e-6 || b.y1 <= 100.0 + 1e-6 || b.y0 >= 220.0 - 1e-6, "nét ngoài tờ: {b:?}");
+    }
+}
+
+/// Card trắng không nền gồm logo và mã QR cùng cỡ (group) với chữ: một bài. Tờ voucher ghép card
+/// (toàn clip group, khác cỡ): mỗi clip group một bài. Group bọc ngoài một tờ: các bài của tờ.
+/// Clip group có hai nửa cùng cỡ bên trong (card gấp): một bài.
+#[test]
+fn dau_cat_khoi_dac_biet() {
+    let mut s = sheet_doc();
+    let logo = plain_rect(&mut s, 110.0, 110.0, 30.0, 30.0);
+    let logo = group_of(&mut s, &[logo]);
+    let qr = plain_rect(&mut s, 160.0, 110.0, 30.0, 30.0);
+    let qr = group_of(&mut s, &[qr]);
+    let name = plain_rect(&mut s, 110.0, 150.0, 80.0, 6.0);
+    let card = group_of(&mut s, &[logo, qr, name]);
+    assert_eq!(cut_marks_on(&mut s, &[card])["cards"], json!(1));
+
+    let mut s = sheet_doc();
+    let voucher = plain_rect(&mut s, 40.0, 40.0, 160.0, 80.0);
+    let voucher = clip_to(&mut s, voucher, (40.0, 40.0, 152.0, 72.0));
+    let small = plain_rect(&mut s, 220.0, 40.0, 100.0, 64.0);
+    let small = clip_to(&mut s, small, (220.0, 40.0, 92.0, 56.0));
+    let sheet = group_of(&mut s, &[voucher, small]);
+    assert_eq!(cut_marks_on(&mut s, &[sheet])["cards"], json!(2));
+
+    let mut s = sheet_doc();
+    let cards: Vec<NodeId> = (0..2)
+        .map(|i| {
+            let x = 60.0 + f64::from(i) * 130.0;
+            let art = plain_rect(&mut s, x - 3.0, 97.0, 106.0, 66.0);
+            clip_to(&mut s, art, (x, 100.0, 100.0, 60.0))
+        })
+        .collect();
+    let sheet = group_of(&mut s, &cards);
+    let wrapper = group_of(&mut s, &[sheet]);
+    assert_eq!(cut_marks_on(&mut s, &[wrapper])["cards"], json!(2));
+
+    // Card trắng gồm hai nửa: [logo, tên] và [điện thoại, địa chỉ] (mỗi thứ một group, hai dòng
+    // chữ cùng cỡ): một bài, không tách theo nửa hay theo dòng.
+    let mut s = sheet_doc();
+    let line = |s: &mut Session, x: f64, y: f64, w: f64, h: f64| {
+        let r = plain_rect(s, x, y, w, h);
+        group_of(s, &[r])
+    };
+    let logo = line(&mut s, 110.0, 105.0, 20.0, 20.0);
+    let name = line(&mut s, 135.0, 110.0, 60.0, 8.0);
+    let top = group_of(&mut s, &[logo, name]);
+    let phone = line(&mut s, 110.0, 135.0, 60.0, 8.0);
+    let address = line(&mut s, 110.0, 147.0, 60.0, 8.0);
+    let bottom = group_of(&mut s, &[phone, address]);
+    let card = group_of(&mut s, &[top, bottom]);
+    let out = cut_marks_on(&mut s, &[card]);
+    assert_eq!(out["cards"], json!(1), "{out}");
+
+    let mut s = sheet_doc();
+    let left = plain_rect(&mut s, 100.0, 100.0, 92.0, 56.0);
+    let left = group_of(&mut s, &[left]);
+    let right = plain_rect(&mut s, 192.0, 100.0, 92.0, 56.0);
+    let right = group_of(&mut s, &[right]);
+    let halves = group_of(&mut s, &[left, right]);
+    let folded = clip_to(&mut s, halves, (100.0, 100.0, 184.0, 56.0));
+    let out = cut_marks_on(&mut s, &[folded]);
+    assert_eq!(out["cards"], json!(1), "{out}");
+}
+
+/// Chọn chi tiết bên trong khối (Direct Selection, giữ Ctrl): dấu cắt vẫn quanh cả bài chứa nó,
+/// không quanh chi tiết; chọn một hàng của tờ thì các bài của hàng đó.
+#[test]
+fn dau_cat_chon_chi_tiet_tinh_ca_bai() {
+    // Tờ 3 card thiết kế cách nhau 30 pt.
+    let mut s = sheet_doc();
+    let cards: Vec<NodeId> = (0..3).map(|i| designed_card(&mut s, 50.0 + f64::from(i) * 130.0, 100.0)).collect();
+    let sheet = group_of(&mut s, &cards);
+    let (logo_art, photo_mask) = {
+        let d = &s.doc().unwrap().doc;
+        let kids = |id: NodeId| d.node(id).unwrap().children().unwrap().iter().map(|c| c.id).collect::<Vec<_>>();
+        // Card 2: [nền, ảnh đã clip, logo đã clip]; trong clip group, con đầu là mask.
+        let card2 = kids(cards[1]);
+        let card3 = kids(cards[2]);
+        (kids(card2[2])[1], kids(card3[1])[0])
+    };
+    // Chỉ chọn hình logo bên trong card 2: một bài, 8 nét ở bốn góc card 2.
+    let out = cut_marks_on(&mut s, &[logo_art]);
+    assert_eq!((out["cards"].as_u64(), out["drawn"].as_u64()), (Some(1), Some(8)), "{out}");
+    let d = &s.doc().unwrap().doc;
+    for m in d.layers.last().unwrap().children().unwrap() {
+        let b = m.geometric_bounds().unwrap();
+        assert!(mark_at_corner(b, [180.0, 100.0, 280.0, 160.0], MARK_REACH), "nét ở góc card 2: {b:?}");
+    }
+    // Chi tiết của card 2 và card 3 (cả mask của ảnh): hai bài; card 2 đã có dấu nên chỉ thêm 8 nét.
+    let out = cut_marks_on(&mut s, &[logo_art, photo_mask]);
+    assert_eq!((out["cards"].as_u64(), out["drawn"].as_u64()), (Some(2), Some(8)), "{out}");
+    // Cả tờ: 3 bài.
+    assert_eq!(cut_marks_on(&mut s, &[sheet])["cards"], json!(3));
+
+    // Tờ 2 hàng × 2 card đã clip; chọn hàng dưới: 2 bài của hàng đó.
+    let mut s = sheet_doc();
+    let mut rows = vec![];
+    for r in 0..2 {
+        let mut row = vec![];
+        for c in 0..2 {
+            let (x, y) = (100.0 + f64::from(c) * 130.0, 100.0 + f64::from(r) * 90.0);
+            let art = plain_rect(&mut s, x - 5.0, y - 5.0, 110.0, 70.0);
+            row.push(clip_to(&mut s, art, (x, y, 100.0, 60.0)));
+        }
+        rows.push(group_of(&mut s, &row));
+    }
+    group_of(&mut s, &rows);
+    let out = cut_marks_on(&mut s, &[rows[1]]);
+    assert_eq!(out["cards"], json!(2), "{out}");
+    let d = &s.doc().unwrap().doc;
+    // Hàng trên ở y 100…160, hàng dưới ở y 190…250: nét của hàng dưới từ y 190 − 3 mm trở xuống.
+    assert!(
+        d.layers.last().unwrap().children().unwrap().iter().all(|m| m.geometric_bounds().unwrap().y0 >= 190.0 - MARK_REACH - 1e-6),
+        "chỉ hàng dưới"
+    );
+}
+
 /// Tài liệu CMYK 330 × 480 mm có `n` mẫu card 9,2 × 5,6 cm đặt ngoài artboard, `cols` cột.
 fn card_sources(n: usize, cols: usize) -> (Session, Vec<NodeId>) {
     let mm = 72.0 / 25.4;

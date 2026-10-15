@@ -1,11 +1,19 @@
-//! DanCard — Dấu cắt tự động (tab Dấu cắt), cùng quy tắc `dcThemDauCatTuDong`.
+//! DanCard — Dấu cắt tự động (tab Dấu cắt), cùng quy tắc vẽ nét của `dcThemDauCatTuDong`.
 //!
-//! Mỗi bài đang chọn (group đã dàn chứa từ 2 clip group trở lên thì mỗi clip group là một bài) được
-//! thêm 8 nét cắt ở 4 góc: nét ngang và nét dọc dài `length`, cách mép bài `gap`. Nét hướng ra vùng
-//! trống; bài nằm sát mép artboard (dưới `edge`) thì nét ở cạnh đó lật vào trong. Nét không đè lên
-//! bài khác, không chạy dọc cạnh của bài kế bên, không ra ngoài artboard và không vẽ trùng nét đã
-//! có (bấm lại nhiều lần vẫn an toàn). Nét nằm trên layer "Dau cat tu dong" (đưa lên trên cùng):
-//! đường hở, không tô, viền K 100 % dày 1 pt, ghi chú `DANCARD_AUTO_CUT_MARK`.
+//! Mỗi bài đang chọn được thêm 8 nét cắt ở 4 góc: nét ngang và nét dọc dài `length`, cách mép bài
+//! `gap`. Nét hướng ra vùng trống; bài nằm sát mép artboard (dưới `edge`) thì nét ở cạnh đó lật vào
+//! trong. Nét không đè lên bài khác, không chạy dọc cạnh của bài kế bên, không ra ngoài artboard và
+//! không vẽ trùng nét đã có (bấm lại nhiều lần vẫn an toàn). Nét nằm trên layer "Dau cat tu dong"
+//! (đưa lên trên cùng): đường hở, không tô, viền K 100 % dày 1 pt, ghi chú `DANCARD_AUTO_CUT_MARK`.
+//!
+//! Bài là từng khối: mỗi group hay clip group đang chọn là một bài, đo cả khối (clip group theo
+//! mask), không tách các chi tiết bên trong. Riêng group chỉ gồm các khối (group / clip group) đặt
+//! rời nhau, không có chi tiết nào khác — một tờ đã dàn, hay một hàng của tờ — thì mỗi khối trong
+//! đó là một bài (khối là group thường thì các bài phải cùng cỡ). Chi tiết bên trong một khối chọn
+//! bằng Direct Selection (giữ Ctrl) tính cả bài chứa nó. DanCard trên Illustrator tách group có từ
+//! 2 clip group con và lấy từng object đang chọn làm bài, nên một card là group có vài clip group
+//! bên trong (ảnh, logo), hay các chi tiết chọn bằng Direct Selection, bị đánh dấu quanh từng chi
+//! tiết; ở đây card đó là một bài.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -33,7 +41,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         "DanCard: Dấu cắt tự động",
         [],
         None,
-        "{length?: mm (dài nét, mặc định 1,4), gap?: mm (cách bài, mặc định 0), edge?: mm (ngưỡng mép artboard để lật nét vào trong, mặc định 4)} thêm dấu cắt 4 góc cho các bài đang chọn (group đã dàn có từ 2 clip group: mỗi clip group một bài; clip group đo theo mask, bài khác theo viền nhìn thấy) trên layer \"Dau cat tu dong\", một bước hoàn tác; không vẽ trùng nét đã có → {message, drawn, cards, skipped}",
+        "{length?: mm (dài nét, mặc định 1,4), gap?: mm (cách bài, mặc định 0), edge?: mm (ngưỡng mép artboard để lật nét vào trong, mặc định 4)} thêm dấu cắt 4 góc cho các bài đang chọn trên layer \"Dau cat tu dong\", một bước hoàn tác; không vẽ trùng nét đã có. Bài là từng khối đang chọn: group hay clip group là một bài, không tách chi tiết bên trong; group chỉ gồm các khối (group / clip group) đặt rời nhau, không có chi tiết khác (tờ đã dàn, hàng của tờ) thì mỗi khối là một bài (khối là group thường thì phải cùng cỡ); chọn chi tiết bên trong một khối thì tính cả bài chứa nó; clip group đo theo mask, bài khác theo viền nhìn thấy → {message, drawn, cards, skipped}",
         has_selection,
         cut_marks
     )]
@@ -82,17 +90,147 @@ fn is_cut_mark(n: &Node, on_mark_layer: bool) -> bool {
     !sp.closed && a.fill_paint().is_none() && k100 && (a.stroke_width() - 1.0).abs() < 1e-3 && straight && axis
 }
 
-/// Bài trong `n`: group thường có từ 2 clip group con trực tiếp thì mỗi clip group là một bài.
-fn collect_cards(n: &Node, out: &mut Vec<NodeId>) {
+/// Hai bài dàn trên tờ "cùng cỡ" khi cạnh ngắn với cạnh ngắn, cạnh dài với cạnh dài lệch nhau
+/// không quá phần này (bài xoay 90° vẫn cùng cỡ; lề tràn, khổ 9 × 5,5 với 9,2 × 5,6 vẫn cùng cỡ).
+const SAME_SIZE: f64 = 0.15;
+/// Số tầng group lồng nhau tối đa được tách thành bài (tờ › hàng › bài…).
+const MAX_BLOCK_DEPTH: usize = 32;
+
+/// Khối: group hay clip group (một bài, hay tờ / hàng gồm các bài).
+fn is_block(n: &Node) -> bool {
+    matches!(n.kind, NodeKind::Group { .. })
+}
+
+/// Hai khung cùng cỡ ([`SAME_SIZE`]).
+fn same_size(a: Rect, b: Rect) -> bool {
+    let close = |x: f64, y: f64| (x - y).abs() <= SAME_SIZE * x.max(y);
+    close(a.width().min(a.height()), b.width().min(b.height())) && close(a.width().max(a.height()), b.width().max(b.height()))
+}
+
+/// Con của `n` có thể là bài: group thường, bỏ dấu cắt và object không có khung.
+fn parts(n: &Node) -> Option<Vec<(&Node, Rect)>> {
+    let NodeKind::Group { children, clip: false } = &n.kind else { return None };
+    Some(
+        children
+            .iter()
+            .map(|c| c.as_ref())
+            .filter(|c| !is_cut_mark(c, false))
+            .filter_map(|c| card_bounds(c).filter(|b| b.width() > 0.0 && b.height() > 0.0).map(|b| (c, b)))
+            .collect(),
+    )
+}
+
+/// Các bài (hay hàng) của `n` khi `n` là tờ đã dàn, một hàng của tờ, hay chỉ bọc một tờ như vậy;
+/// `None`: `n` là một bài.
+///
+/// Tờ / hàng là group thường chỉ gồm từ 2 khối (group / clip group) — không có path, chữ, ảnh nào
+/// khác (card có nền, chữ, ảnh hay logo đã clip là một bài) — đặt rời nhau: không khối nào chứa tâm
+/// khối khác (lề tràn của các card dàn sát nhau chồng lên nhau một dải vẫn là rời nhau). Khối toàn
+/// clip group là các bài như DanCard; có group thường thì các bài phải cùng cỡ (card gồm khối chữ
+/// và khối logo khác cỡ là một bài), trừ khối là hàng. Clip group luôn là một bài: card đôi, card
+/// gấp có hai nửa bên trong vẫn là một bài.
+fn layout_blocks(n: &Node, depth: usize) -> Option<Vec<&Node>> {
+    if depth >= MAX_BLOCK_DEPTH {
+        return None;
+    }
+    let parts = parts(n)?;
+    if parts.iter().any(|(c, _)| !is_block(c)) {
+        return None;
+    }
+    match parts.as_slice() {
+        [] => return None,
+        // Chỉ bọc một khối (group › group › bài): bài là của khối đó.
+        [(only, _)] => return layout_blocks(only, depth + 1).map(|_| vec![*only]),
+        _ => {}
+    }
+    // Rời nhau. Quét theo trục x: chỉ so các khối có khoảng x giao nhau.
+    let mut boxes: Vec<Rect> = parts.iter().map(|(_, b)| *b).collect();
+    boxes.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+    for (i, a) in boxes.iter().enumerate() {
+        for b in boxes.iter().skip(i + 1).take_while(|b| b.x0 < a.x1) {
+            if a.contains(b.center()) || b.contains(a.center()) {
+                return None;
+            }
+        }
+    }
+    if !parts.iter().all(|(c, _)| c.clips()) {
+        // Các bài là group thường, ở tầng này và trong các hàng, cùng cỡ.
+        let mut cards = vec![];
+        for (c, _) in &parts {
+            plain_cards(c, depth + 1, &mut cards);
+        }
+        if let Some((first, rest)) = cards.split_first()
+            && rest.iter().any(|b| !same_size(*first, *b))
+        {
+            return None;
+        }
+    }
+    Some(parts.into_iter().map(|(c, _)| c).collect())
+}
+
+/// Khung các bài là group thường trong khối `b`: chính nó, hay khi nó là hàng / tờ tách được thì
+/// các bài như vậy bên trong. Clip group là bài như DanCard, không xét cỡ.
+fn plain_cards(b: &Node, depth: usize, out: &mut Vec<Rect>) {
+    if b.clips() {
+        return;
+    }
+    match layout_blocks(b, depth) {
+        Some(blocks) => {
+            for c in blocks {
+                plain_cards(c, depth + 1, out);
+            }
+        }
+        None => out.extend(card_bounds(b)),
+    }
+}
+
+/// Bài của các object đang chọn `roots` (xem đầu file), theo thứ tự, không trùng. Group / clip
+/// group đang chọn, hay object nằm thẳng trên layer, là một bài, hay các bài của nó khi nó là tờ /
+/// hàng. Chi tiết bên trong một khối (chọn bằng Direct Selection, giữ Ctrl) thuộc về bài chứa nó
+/// trong khối ngoài cùng (cái Selection tool chọn).
+fn selected_cards(d: &Document, roots: &[NodeId]) -> Vec<NodeId> {
+    let mut out = vec![];
+    let mut seen = HashSet::new();
+    // Các bài của từng khối ngoài cùng, tính một lần cho mỗi khối.
+    let mut blocks: std::collections::HashMap<NodeId, Vec<NodeId>> = std::collections::HashMap::new();
+    for &r in roots {
+        let Some(chain) = d.ancestry(r) else { continue };
+        let Some(node) = d.node(r) else { continue };
+        let take = match chain.iter().find_map(|id| d.node(*id).filter(|n| !matches!(n.kind, NodeKind::Layer { .. }))) {
+            // Chi tiết bên trong một khối: bài của khối ngoài cùng có chứa nó.
+            Some(top) if top.id != r && !is_block(node) => {
+                let cards = blocks.entry(top.id).or_insert_with(|| {
+                    let mut v = vec![];
+                    collect_cards(top, &mut v, 0);
+                    v
+                });
+                cards.iter().copied().filter(|c| chain.contains(c)).collect()
+            }
+            _ => {
+                let mut v = vec![];
+                collect_cards(node, &mut v, 0);
+                v
+            }
+        };
+        for c in take {
+            if seen.insert(c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Bài trong `n` (xem đầu file): `n` là một bài, hay khi là tờ / hàng đã dàn thì từng bài của nó.
+fn collect_cards(n: &Node, out: &mut Vec<NodeId>, depth: usize) {
     if is_cut_mark(n, false) {
         return;
     }
-    if let NodeKind::Group { children, clip: false } = &n.kind {
-        let direct: Vec<NodeId> = children.iter().filter(|c| !is_cut_mark(c, false) && c.clips()).map(|c| c.id).collect();
-        if direct.len() >= 2 {
-            out.extend(direct);
-            return;
+    if let Some(blocks) = layout_blocks(n, depth) {
+        for b in blocks {
+            collect_cards(b, out, depth + 1);
         }
+        return;
     }
     out.push(n.id);
 }
@@ -211,12 +349,7 @@ fn cut_marks(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let st = s.doc()?;
     let d = &st.doc;
-    let mut ids = vec![];
-    for id in &roots {
-        if let Some(n) = d.node(*id) {
-            collect_cards(n, &mut ids);
-        }
-    }
+    let ids = selected_cards(d, &roots);
     let mut cards = vec![];
     let mut skipped = 0;
     for id in ids {
