@@ -385,9 +385,16 @@ pub fn floating_panel(app: &mut VectorcraftApp, ctx: &egui::Context) {
 }
 
 /// The width of a popped-out or floating panel: the tabbed group's panels keep the width the dock
-/// gives them; icon panels are 256 points.
+/// gives them; icon panels are 256 points (the DanCard panel `panels::dancard::WIDTH`).
 pub(crate) fn panel_width(id: &str) -> f32 {
-    if DockTab::from_id(id).is_some() { DOCK_WIDTH } else { 256.0 }
+    if DockTab::from_id(id).is_some() {
+        DOCK_WIDTH
+    } else if id == crate::panels::dancard::ID {
+        // DanCard: wider, for its header and side-by-side fields.
+        crate::panels::dancard::WIDTH
+    } else {
+        256.0
+    }
 }
 
 /// Panel `id`'s contents in a popped-out or floating panel `width` wide; the tabbed group's panels

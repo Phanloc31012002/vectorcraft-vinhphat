@@ -3,13 +3,12 @@
 //! "n con / tờ" rồi tới ghi chú, như `showCountResult` của DanCard. Khi số vị trí không chia đều
 //! cho số mẫu, panel hỏi "Dừng lại" / "Tiếp tục" như hộp thoại "Dàn nhiều loại".
 
-use egui::{RichText, Ui};
+use egui::Ui;
 use serde_json::{Value, json};
 
-use super::{Note, check_box, count_prefix, note_id, run_and_note, text_box};
+use super::{Note, check_box, count_prefix, note_id, num_fields, run_and_note, style};
 use crate::VectorcraftApp;
 use crate::panels::{pstate, set_pstate};
-use crate::theme::Tokens;
 
 const AREA: &str = "kts";
 const COMMAND: &str = "dancard.ktsLayout";
@@ -17,34 +16,15 @@ const COMMAND: &str = "dancard.ktsLayout";
 const ASK: &str = "dancard-kts-ask";
 
 pub(super) fn section(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let hint = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    ui.label(RichText::new("Dàn tối ưu không pon").strong().color(t.text));
-    hint(ui, "Chọn các bài, nhập khổ giấy rồi dàn.");
-    let (width, height) = egui::Grid::new("dancard-kts-paper")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label(RichText::new("Ngang giấy (cm)").color(t.text_dim));
-            ui.label(RichText::new("Dọc giấy (cm)").color(t.text_dim));
-            ui.end_row();
-            let w = text_box(app, ui, "ktsSheetW", "33", 80.0);
-            let h = text_box(app, ui, "ktsSheetH", "35.4", 80.0);
-            ui.end_row();
-            (w, h)
-        })
-        .inner;
+    style::label(ui, "Dàn tối ưu không pon");
+    style::hint(ui, "Chọn các bài, nhập khổ giấy rồi dàn.");
+    let [width, height] = num_fields(app, ui, [("Ngang giấy (cm)", "ktsSheetW", "33"), ("Dọc giấy (cm)", "ktsSheetH", "35.4")]);
     let two_sided = check_box(app, ui, "ktsTwoSided", "Dàn 2 mặt đối xứng", false);
-    hint(ui, "Xếp theo hàng: trái = trước, phải = sau.");
+    style::hint(ui, "Xếp theo hàng: trái = trước, phải = sau.");
     let multi = check_box(app, ui, "ktsMulti", "Dàn nhiều mẫu vào một tờ", false);
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Tự nhân bản tối đa con lớn trước, rồi nhân bản con nhỏ lấp phần còn lại.").strong().color(t.text_dim));
-        ui.label(RichText::new("Mẫu đã dàn được xóa khỏi nguồn; mẫu chưa dàn được giữ lại.").color(t.text_dim));
-    });
-    hint(ui, "Lề 3 mm, khe 0 mm; không PON.");
-    ui.add_space(6.0);
+    style::hint_strong(ui, "Tự nhân bản tối đa con lớn trước, rồi nhân bản con nhỏ lấp phần còn lại.");
+    style::hint(ui, "Mẫu đã dàn được xóa khỏi nguồn; mẫu chưa dàn được giữ lại.");
+    style::hint(ui, "Lề 3 mm, khe 0 mm; không PON.");
     let params = |uneven: Option<bool>| {
         let mut p = json!({"width": width, "height": height, "twoSided": two_sided, "multiPerArtboard": multi});
         if let Some(go) = uneven {
@@ -52,31 +32,27 @@ pub(super) fn section(app: &mut VectorcraftApp, ui: &mut Ui) {
         }
         p
     };
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    let button = egui::Button::new("Dàn tối ưu").min_size(egui::vec2(ui.available_width(), 0.0));
-    if ui.add_enabled(has_selection, button).clicked() {
+    if style::primary(ui, "Dàn tối ưu", super::has_selection(app)).clicked() {
         set_pstate(ui.ctx(), ASK, String::new());
         run(app, ui, params(None));
     }
     let question: String = pstate(ui.ctx(), ASK);
     if !question.is_empty() {
-        ui.add_space(4.0);
-        ui.label(RichText::new("Dàn nhiều loại").strong().color(t.text));
-        ui.label(RichText::new(question.as_str()).color(t.text));
+        style::title(ui, "Dàn nhiều loại");
+        style::text(ui, question.as_str());
         let mut answer = None;
-        ui.horizontal(|ui| {
-            if ui.button("Dừng lại").clicked() {
-                answer = Some(false);
-            }
-            if ui.button("Tiếp tục").clicked() {
-                answer = Some(true);
+        style::columns(ui, 2, |ui, i| {
+            let (label, go) = if i == 0 { ("Dừng lại", false) } else { ("Tiếp tục", true) };
+            if style::button(ui, label, true, true).clicked() {
+                answer = Some(go);
             }
         });
-        let Some(go) = answer else { return };
-        set_pstate(ui.ctx(), ASK, String::new());
-        run(app, ui, params(Some(go)));
+        if let Some(go) = answer {
+            set_pstate(ui.ctx(), ASK, String::new());
+            run(app, ui, params(Some(go)));
+        }
     }
-    result(ui, &t);
+    super::show_count_note(ui, AREA, "Chọn một bài rồi bấm Dàn tối ưu.");
 }
 
 /// Chạy lệnh. Câu hỏi "không chia đều" (lệnh dừng, chưa dàn gì) thành câu hỏi của panel thay
@@ -97,11 +73,6 @@ fn run(app: &mut VectorcraftApp, ui: &Ui, params: Value) {
     }
     // Chỉ là khung nhìn: không tới được (chưa có cửa sổ vẽ) thì bỏ qua.
     let _ = app.run("view.goToArtboard", json!({"index": 0}));
-}
-
-/// Ô kết quả: "n con / tờ" đậm rồi ghi chú; lỗi và thông báo khác như các tab khác.
-fn result(ui: &mut Ui, t: &Tokens) {
-    super::show_count_note(ui, AREA, t, "Chọn một bài rồi bấm Dàn tối ưu.");
 }
 
 #[cfg(test)]
@@ -127,14 +98,15 @@ mod tests {
         app.run("file.new", json!({"width": 600, "height": 400})).unwrap();
         let text = painted_text(&mut app, section);
         for s in [
-            "Dàn tối ưu không pon",
-            "Ngang giấy (cm)",
-            "Dọc giấy (cm)",
+            "DÀN TỐI ƯU KHÔNG PON",
+            "NGANG GIẤY (CM)",
+            "DỌC GIẤY (CM)",
             "35.4",
             "Dàn 2 mặt đối xứng",
             "Xếp theo hàng: trái = trước, phải = sau.",
             "Dàn nhiều mẫu vào một tờ",
             "Lề 3 mm, khe 0 mm; không PON.",
+            "Dàn tối ưu",
             "Chọn một bài rồi bấm Dàn tối ưu.",
         ] {
             assert!(text.contains(s), "{s}: {text}");

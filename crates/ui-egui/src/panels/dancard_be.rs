@@ -1,68 +1,40 @@
 //! Mục Dàn bế của tab Dàn tối ưu (DanCard): dàn decal / tag theo khuôn bế, tự vẽ bốn chấm PON
 //! tròn 5 mm theo khổ giấy nhập (`dancard.dieLayout`). Ô, mặc định và gợi ý như panel DanCard.
 
-use egui::{RichText, Ui};
+use egui::Ui;
 use serde_json::json;
 
+use super::{check_box, num_field, num_fields, style};
 use crate::VectorcraftApp;
-use crate::theme::Tokens;
+
+const AREA: &str = "danbe";
 
 pub(super) fn section(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let dim = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    ui.label(RichText::new("Dàn decal / tag theo khuôn bế").strong().color(t.text));
-    dim(ui, "Chọn từng mẫu: Khuôn → Bài; hai mặt: Khuôn → Trước → Sau.");
-
-    let (mut paper_w, mut paper_h) = (String::new(), String::new());
-    egui::Grid::new("dancard-be-paper").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-        dim(ui, "Ngang giấy (cm)");
-        dim(ui, "Cao giấy (cm)");
-        ui.end_row();
-        paper_w = super::text_box(app, ui, "bePaperW", "33", 72.0);
-        paper_h = super::text_box(app, ui, "bePaperH", "35.4", 72.0);
-        ui.end_row();
-    });
-
-    let mut pon = [String::new(), String::new(), String::new(), String::new()];
-    egui::Grid::new("dancard-be-pon").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
-        for s in ["Trên (mm)", "Dưới (mm)", "Trái (mm)", "Phải (mm)"] {
-            dim(ui, s);
+    style::label(ui, "Dàn decal / tag theo khuôn bế");
+    style::hint(ui, "Chọn từng mẫu: Khuôn → Bài; hai mặt: Khuôn → Trước → Sau.");
+    let [paper_w, paper_h] = num_fields(app, ui, [("Ngang giấy (cm)", "bePaperW", "33"), ("Cao giấy (cm)", "bePaperH", "35.4")]);
+    let [top, bottom, left, right] = num_fields(
+        app,
+        ui,
+        [("Trên (mm)", "bePonTop", "10"), ("Dưới (mm)", "bePonBottom", "10"), ("Trái (mm)", "bePonLeft", "10"), ("Phải (mm)", "bePonRight", "10")],
+    );
+    style::hint(ui, "PON tròn 5 mm. Bốn khoảng đo từ mép tờ đến tâm chấm.");
+    let [gap, margin] = num_fields(app, ui, [("Khe giữa 2 khuôn (mm)", "beGap", "2"), ("Khuôn cách mép tờ (mm)", "beMargin", "4")]);
+    let mut clear = String::new();
+    // Ô Né PON chiếm nửa hàng như DanCard (ô bên cạnh để trống).
+    style::columns(ui, 2, |ui, i| {
+        if i == 0 {
+            clear = num_field(app, ui, "Né PON (mm)", "bePonClear", "7.5");
         }
-        ui.end_row();
-        for (v, key) in pon.iter_mut().zip(["bePonTop", "bePonBottom", "bePonLeft", "bePonRight"]) {
-            *v = super::text_box(app, ui, key, "10", 44.0);
-        }
-        ui.end_row();
     });
-    dim(ui, "PON tròn 5 mm. Bốn khoảng đo từ mép tờ đến tâm chấm.");
-
-    let (mut gap, mut margin, mut clear) = (String::new(), String::new(), String::new());
-    egui::Grid::new("dancard-be-gap").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-        dim(ui, "Khe giữa 2 khuôn (mm)");
-        dim(ui, "Khuôn cách mép tờ (mm)");
-        ui.end_row();
-        gap = super::text_box(app, ui, "beGap", "2", 72.0);
-        margin = super::text_box(app, ui, "beMargin", "4", 72.0);
-        ui.end_row();
-        dim(ui, "Né PON (mm)");
-        ui.end_row();
-        clear = super::text_box(app, ui, "bePonClear", "7.5", 72.0);
-        ui.end_row();
-    });
-    dim(ui, "Khe tính giữa đường bế; né PON tính từ mép chấm.");
-
-    let two = super::check_box(app, ui, "beTwoSided", "Dàn bế 2 mặt (tag)", false);
-    dim(ui, "Lật ngang như KTS, không lật gương chữ/hình.");
-    let multi = super::check_box(app, ui, "beMultiPerArtboard", "Dàn nhiều mẫu vào một tờ", false);
-    dim(ui, "Mặc định mỗi mẫu một tờ; tick để gộp.");
-
-    ui.add_space(6.0);
+    style::hint(ui, "Khe tính giữa đường bế; né PON tính từ mép chấm.");
+    let two = check_box(app, ui, "beTwoSided", "Dàn bế 2 mặt (tag)", false);
+    style::hint(ui, "Lật ngang như KTS, không lật gương chữ/hình.");
+    let multi = check_box(app, ui, "beMultiPerArtboard", "Dàn nhiều mẫu vào một tờ", false);
+    style::hint(ui, "Mặc định mỗi mẫu một tờ; tick để gộp.");
     // Không chọn gì thì lệnh lấy mẫu theo layer Khuôn bế / Bài, nên chỉ cần tài liệu đang mở.
     let has_doc = app.session.active().is_some();
-    if ui.add_enabled(has_doc, egui::Button::new("Dàn bế")).clicked() {
-        let [top, bottom, left, right] = pon;
+    if style::primary(ui, "Dàn bế", has_doc).clicked() {
         let params = json!({
             "paperW": paper_w,
             "paperH": paper_h,
@@ -86,10 +58,8 @@ pub(super) fn section(app: &mut VectorcraftApp, ui: &mut Ui) {
             let _ = app.run("view.goToArtboard", json!({"index": 0}));
         }
     }
-    super::show_count_note(ui, AREA, &t, "Chọn mẫu rồi bấm Dàn bế.");
+    super::show_count_note(ui, AREA, "Chọn mẫu rồi bấm Dàn bế.");
 }
-
-const AREA: &str = "danbe";
 
 #[cfg(test)]
 mod tests {
@@ -108,12 +78,12 @@ mod tests {
         app.run("file.new", json!({"width": 600, "height": 400})).unwrap();
         let text = painted_text(&mut app, section);
         let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("thiếu {s}: {text}"));
-        let order = ["Ngang giấy (cm)", "Cao giấy (cm)", "Trên (mm)", "Dưới (mm)", "Trái (mm)", "Phải (mm)"].map(at);
+        let order = ["NGANG GIẤY (CM)", "CAO GIẤY (CM)", "TRÊN (MM)", "DƯỚI (MM)", "TRÁI (MM)", "PHẢI (MM)"].map(at);
         assert!(order.windows(2).all(|w| w[0] < w[1]), "sáu ô theo đúng thứ tự người dùng yêu cầu");
         for s in [
-            "Khe giữa 2 khuôn (mm)",
-            "Khuôn cách mép tờ (mm)",
-            "Né PON (mm)",
+            "KHE GIỮA 2 KHUÔN (MM)",
+            "KHUÔN CÁCH MÉP TỜ (MM)",
+            "NÉ PON (MM)",
             "Khuôn → Bài",
             "Khuôn → Trước → Sau",
             "PON tròn 5 mm",

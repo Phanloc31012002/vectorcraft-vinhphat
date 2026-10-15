@@ -2,12 +2,11 @@
 //! Lưu AI + JPG + ZIP theo khổ vừa dàn (`dancard.saddleStitch`, `dancard.perfectBind`,
 //! `dancard.saveCtlPackage`). Ghi chú RUỘT N lấy từ các ô của tab thay cho hộp thoại ghi chú.
 
-use egui::{RichText, Ui};
+use egui::Ui;
 use serde_json::{Value, json};
 
-use super::{Note, check_box, note_id, run_and_note, save, saved, show_note, text_box};
+use super::{Note, accordion, check_box, folder_row, note_id, run_and_note, save, saved, show_note, size_pair, style, text_box};
 use crate::VectorcraftApp;
-use crate::theme::Tokens;
 
 /// Kế hoạch lưu theo khổ của lần dàn gần nhất (`sizes` của lệnh dàn).
 const SIZES_KEY: &str = "ctlSizes";
@@ -22,19 +21,9 @@ fn parse_float(s: &str) -> Option<f64> {
     (1..=run).rev().find_map(|n| t.get(..n).and_then(|h| h.parse::<f64>().ok())).filter(|v| v.is_finite())
 }
 
-fn hint(ui: &mut Ui, t: &Tokens, s: &str) {
-    ui.label(RichText::new(s).color(t.text_dim));
-}
-
-/// Hai ô rộng × cao (cm) trên một hàng.
+/// Hai ô rộng × cao một trang (cm).
 fn size_row(app: &mut VectorcraftApp, ui: &mut Ui, w_key: &str, h_key: &str) -> (String, String) {
-    ui.horizontal(|ui| {
-        let w = text_box(app, ui, w_key, "", 56.0);
-        ui.label("×");
-        let h = text_box(app, ui, h_key, "", 56.0);
-        (w, h)
-    })
-    .inner
+    size_pair(app, ui, "Kích thước 1 trang (cm)", (w_key, ""), (h_key, ""))
 }
 
 /// Chạy lệnh dàn `id` với khổ `w` × `h` (cm) và các tham số `extra`; giữ kế hoạch lưu theo khổ.
@@ -59,43 +48,38 @@ fn impose(app: &mut VectorcraftApp, ui: &Ui, id: &str, w: &str, h: &str, extra: 
 }
 
 fn saddle(app: &mut VectorcraftApp, ui: &mut Ui, enabled: bool) {
-    let t = Tokens::get(ui.ctx());
-    hint(ui, &t, "Số trang chia hết cho 4. Chỉ bóp ruột, giữ nguyên PON.");
-    hint(ui, &t, "Kích thước 1 trang (cm)");
+    style::hint(ui, "Số trang chia hết cho 4. Chỉ bóp ruột, giữ nguyên PON.");
     let (w, h) = size_row(app, ui, "ctlSigW", "ctlSigH");
     let cover = check_box(app, ui, "ctlSigCover", "Có bìa (chọn cả file: bìa + ruột)", true);
     let notes = check_box(app, ui, "ctlSigNotes", "Ghi chú RUỘT N (mặt A mỗi tờ)", true);
     let (mut cover_note, mut inside) = (String::new(), String::new());
     if notes {
         if cover {
-            hint(ui, &t, "Ghi chú BÌA (không tự thêm chữ):");
-            cover_note = text_box(app, ui, "ctlSigCoverNote", "", 220.0);
+            style::label(ui, "Ghi chú BÌA (không tự thêm chữ)");
+            cover_note = text_box(app, ui, "ctlSigCoverNote", "", "");
         }
-        hint(ui, &t, "Ghi chú ruột (thêm sau RUỘT N, chữ đỏ):");
-        inside = text_box(app, ui, "ctlSigInside", "", 220.0);
+        style::label(ui, "Ghi chú ruột (thêm sau RUỘT N, chữ đỏ)");
+        inside = text_box(app, ui, "ctlSigInside", "", "");
     }
-    if ui.add_enabled(enabled, egui::Button::new("Dàn Đóng ghim giữa")).clicked() {
+    if style::primary(ui, "Dàn Đóng ghim giữa", enabled).clicked() {
         let extra = json!({"cover": cover, "notes": notes, "coverNote": cover_note, "insideNote": inside});
         impose(app, ui, "dancard.saddleStitch", &w, &h, extra);
     }
 }
 
 fn perfect(app: &mut VectorcraftApp, ui: &mut Ui, enabled: bool) {
-    let t = Tokens::get(ui.ctx());
-    hint(
+    style::hint(
         ui,
-        &t,
         "Khớp rộng × cao theo số nhập. AB 85,8 × 62,5 cm: A4 16 trang, A5 32 trang/tờ. A4 tối đa 21,2 × 30 cm; tờ nhỏ thu về cạnh 20,9 cm. Bìa dàn tay.",
     );
-    hint(ui, &t, "Kích thước 1 trang (cm)");
     let (w, h) = size_row(app, ui, "ctlKeoW", "ctlKeoH");
     let notes = check_box(app, ui, "ctlKeoNotes", "Ghi chú RUỘT N (mặt A mỗi tờ)", true);
     let mut inside = String::new();
     if notes {
-        hint(ui, &t, "Ghi chú ruột (thêm sau RUỘT N, chữ đỏ):");
-        inside = text_box(app, ui, "ctlKeoInside", "", 220.0);
+        style::label(ui, "Ghi chú ruột (thêm sau RUỘT N, chữ đỏ)");
+        inside = text_box(app, ui, "ctlKeoInside", "", "");
     }
-    if ui.add_enabled(enabled, egui::Button::new("Dàn Keo gáy")).clicked() {
+    if style::primary(ui, "Dàn Keo gáy", enabled).clicked() {
         impose(app, ui, "dancard.perfectBind", &w, &h, json!({"notes": notes, "insideNote": inside}));
     }
 }
@@ -138,34 +122,20 @@ fn save_box(app: &mut VectorcraftApp, ui: &mut Ui) {
     if buttons.is_empty() {
         return;
     }
-    let t = Tokens::get(ui.ctx());
-    ui.separator();
-    ui.label(RichText::new("Lưu AI + JPG + ZIP theo khổ vừa dàn").strong().color(t.text));
-    hint(ui, &t, "Mỗi tờ một bộ; A/B chung một JPG và ZIP.");
-    hint(ui, &t, "Nội dung sau RUỘT N / BÌA");
-    let suffix = text_box(app, ui, "ctlSuffix", "", 220.0);
-    hint(ui, &t, "VD: CATALOGUE KMC -- IN 1.100 tờ…");
-    hint(ui, &t, "Thư mục lưu");
-    let folder = saved(app, FOLDER_KEY, "");
-    ui.horizontal(|ui| {
-        let shown = if folder.is_empty() { "(chưa chọn: hỏi khi lưu)".to_string() } else { folder.clone() };
-        ui.label(RichText::new(shown).color(t.text));
-        if ui.button("Chọn…").clicked() {
-            crate::picks::button(app, |app| {
-                if let Some(f) = crate::picks::folder(app) {
-                    save(app, FOLDER_KEY, &f);
-                }
-            });
-        }
-    });
+    style::label(ui, "Lưu AI + JPG + ZIP theo khổ vừa dàn");
+    style::hint(ui, "Mỗi tờ một bộ; A/B chung một JPG và ZIP.");
+    style::label(ui, "Nội dung sau RUỘT N / BÌA");
+    let suffix = text_box(app, ui, "ctlSuffix", "", "CATALOGUE KMC -- IN 1.100 tờ…");
+    style::label(ui, "Thư mục lưu (bỏ trống = hỏi khi lưu)");
+    folder_row(app, ui, FOLDER_KEY, "");
     let total = sizes["total"].clone();
     for (text, jobs) in buttons {
-        if !ui.button(text).clicked() {
+        if !style::button(ui, &text, true, true).clicked() {
             continue;
         }
         let params = json!({"total": total, "jobs": jobs, "suffix": suffix});
         let folder = saved(app, FOLDER_KEY, "");
-        if folder.is_empty() {
+        if folder.trim().is_empty() {
             // Chưa có thư mục: chọn rồi lưu luôn (hộp chọn có thể trả lời sau).
             let ctx = ui.ctx().clone();
             crate::picks::button(app, move |app| {
@@ -175,20 +145,19 @@ fn save_box(app: &mut VectorcraftApp, ui: &mut Ui) {
                 }
             });
         } else {
-            save_package(app, ui.ctx(), &params, &folder);
+            save_package(app, ui.ctx(), &params, folder.trim());
         }
     }
-    show_note(ui, "ctlSave", &t, "Bấm nút của khổ cần lưu.");
+    show_note(ui, "ctlSave", "Bấm nút của khổ cần lưu.");
 }
 
 pub(super) fn section(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    ui.label(RichText::new("Dàn CTL Offset (bấm ghim giữa, tự chọn khổ)").strong().color(t.text));
-    hint(ui, &t, "Chọn trang theo thứ tự đọc; nhập khổ một trang.");
-    let enabled = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    egui::CollapsingHeader::new("Đóng ghim giữa").id_salt("dancard-ctl-sig").show(ui, |ui| saddle(app, ui, enabled));
-    egui::CollapsingHeader::new("Keo gáy").id_salt("dancard-ctl-keo").show(ui, |ui| perfect(app, ui, enabled));
-    show_note(ui, "ctl", &t, "Nhập kích thước rồi bấm Dàn.");
+    style::label(ui, "Dàn CTL Offset (bấm ghim giữa, tự chọn khổ)");
+    style::hint(ui, "Chọn trang theo thứ tự đọc; nhập khổ một trang.");
+    let enabled = super::has_selection(app);
+    accordion(app, ui, "ctlSig", "Đóng ghim giữa", false, |app, ui| saddle(app, ui, enabled));
+    accordion(app, ui, "ctlKeo", "Keo gáy", false, |app, ui| perfect(app, ui, enabled));
+    show_note(ui, "ctl", "Nhập kích thước rồi bấm Dàn.");
     save_box(app, ui);
 }
 

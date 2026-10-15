@@ -1,23 +1,26 @@
-//! Panel "Công cụ bình" (DanCard, IN Vĩnh Phát).
+//! Panel "Công cụ bình" (DanCard, IN Vĩnh Phát), bố cục và màu như panel DanCard trên Illustrator
+//! (`dancard_style.rs`).
 //!
-//! - Đầu panel: Raster (CMYK, 500 ppi, nền trong suốt, đúng khung nhìn thấy), Resize và Clip theo
-//!   kích thước nhập (giữ tâm).
+//! - Đầu panel: dấu 4 màu, tên panel, nút Raster (CMYK, 500 ppi, nền trong suốt, đúng khung nhìn
+//!   thấy), Resize và Clip theo kích thước nhập (giữ tâm, bảng nhập mở ngay dưới), tác giả và người
+//!   thử như DanCard.
+//! - Các tab theo thứ tự của DanCard: Dàn file, Dàn tối ưu, Dấu cắt, Dàn theo mẫu, Catalogue, CTL
+//!   Offset, Đổi tên, Variable, Auto Save; thêm tab Đo khung của bản VectorCraft ở cuối. Mỗi tab có
+//!   ô kết quả như DanCard (xanh: xong, đỏ: lỗi, "n con / tờ").
 //! - Tab Đo khung: khung transform của thứ đang chọn — góc xoay, rộng × cao, tâm — đọc bằng lệnh
 //!   `dancard.transform`, khớp số với bảng Transform. Chọn clip group, group lồng nhiều tầng hay
 //!   object con đều đọc thẳng. Riêng hình chữ nhật đặt nghiêng trong file .ai/PDF (không lưu góc)
 //!   thì panel cho khung dò được, kèm số của bảng Transform để đối chiếu. Chỉ tính lại khi tài
 //!   liệu, vùng chọn hoặc đơn vị đổi.
-//! - Tab Đổi tên: `dancard.rename`.
 //!
-//! Giá trị đã gõ vào các ô được giữ lại giữa các lần mở app (`UiState::dancard`).
+//! Giá trị đã gõ vào các ô, tab đang mở và mục gập đang mở được giữ lại giữa các lần mở app
+//! (`UiState::dancard`).
 
-use egui::{Color32, RichText, Ui};
+use egui::Ui;
 use serde_json::{Value, json};
 
 use super::{pstate, set_pstate};
 use crate::VectorcraftApp;
-use crate::theme::Tokens;
-use crate::widgets;
 
 pub const ID: &str = "dancard";
 
@@ -30,10 +33,18 @@ mod ctl;
 mod kts;
 #[path = "dancard_mau.rs"]
 mod mau;
+#[path = "dancard_style.rs"]
+mod style;
 #[path = "dancard_tutro.rs"]
 mod tutro;
 #[path = "dancard_variable.rs"]
 mod variable;
+
+/// Bề rộng panel khi mở từ cột biểu tượng hay nổi (dock::panel_width): rộng hơn panel thường cho
+/// đầu panel và các ô cạnh nhau như DanCard.
+pub const WIDTH: f32 = 320.0;
+/// Lề trong của panel (dock::panel_body), nền DanCard phủ cả lề.
+const MARGIN: f32 = 10.0;
 
 /// Chữ của fork DanCard: tiếng Việt (có chữ ă, đ, ơ, ư hay dấu thanh) hoặc bắt đầu bằng
 /// "DanCard". Không nằm trong bộ dịch của VectorCraft, nên các bài kiểm tra "mọi chuỗi đều có bản
@@ -65,40 +76,31 @@ fn source_label(s: &Value) -> &'static str {
     }
 }
 
-fn frame_rows(ui: &mut Ui, f: &Value, unit: &str, t: &Tokens, id: &str) {
-    let mono = |ui: &mut Ui, s: String| {
-        ui.label(RichText::new(s).monospace().color(t.text));
-    };
-    let dim = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    egui::Grid::new(("dancard-frame", id)).num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
-        dim(ui, "Góc:");
-        mono(ui, format!("{}°", num(&f["angle"])));
-        dim(ui, "");
-        dim(ui, source_label(&f["source"]));
-        ui.end_row();
-        dim(ui, "Rộng:");
-        mono(ui, format!("{} {unit}", num(&f["width"])));
-        dim(ui, "Cao:");
-        mono(ui, format!("{} {unit}", num(&f["height"])));
-        ui.end_row();
-        // Tâm theo thước: bằng X/Y của bảng Transform khi chọn điểm tâm.
-        dim(ui, "Tâm X:");
-        mono(ui, num(&f["rulerCenter"][0]));
-        dim(ui, "Tâm Y:");
-        mono(ui, num(&f["rulerCenter"][1]));
-        ui.end_row();
-    });
+/// Số đo của khung `f` thành từng cặp ô (nhãn trên, số dưới) như các ô của panel: góc và cách đọc
+/// khung, rộng × cao, tâm.
+fn frame_rows(ui: &mut Ui, f: &Value, unit: &str) {
+    let angle = format!("{}°", num(&f["angle"]));
+    let (width, height) = (format!("{} {unit}", num(&f["width"])), format!("{} {unit}", num(&f["height"])));
+    // Tâm theo thước: bằng X/Y của bảng Transform khi chọn điểm tâm.
+    let (cx, cy) = (num(&f["rulerCenter"][0]), num(&f["rulerCenter"][1]));
+    let rows: [[(&str, &str); 2]; 3] =
+        [[("Góc", angle.as_str()), ("Khung", source_label(&f["source"]))], [("Rộng", &width), ("Cao", &height)], [("Tâm X", &cx), ("Tâm Y", &cy)]];
+    for row in rows {
+        style::columns(ui, 2, |ui, i| {
+            if let Some((label, value)) = row.get(i) {
+                style::label(ui, label);
+                style::readout(ui, value);
+            }
+        });
+    }
     if let Some(tb) = f.get("transformBox") {
-        ui.label(RichText::new(format!("Bảng Transform (khung thẳng): {} × {} {unit}", num(&tb["width"]), num(&tb["height"]))).color(t.text_dim));
+        style::hint(ui, &format!("Bảng Transform (khung thẳng): {} × {} {unit}", num(&tb["width"]), num(&tb["height"])));
     }
 }
 
-/// Các tab của panel: (khóa, nhãn).
+/// Các tab của panel: (khóa, nhãn), theo thứ tự của DanCard; Đo khung (của bản VectorCraft) ở cuối.
 const TABS: &[(&str, &str)] = &[
-    ("measure", "Đo khung"),
-    ("danfile", "Dàn card"),
+    ("danfile", "Dàn file"),
     ("toiuu", "Dàn tối ưu"),
     ("cutmarks", "Dấu cắt"),
     ("danmau", "Dàn theo mẫu"),
@@ -107,32 +109,46 @@ const TABS: &[(&str, &str)] = &[
     ("rename", "Đổi tên"),
     ("variable", "Variable"),
     ("autosave", "Auto Save"),
+    ("measure", "Đo khung"),
 ];
 
 pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
-    header(app, ui);
-    widgets::divider(ui);
-    let tab = saved(app, "tab", "measure");
-    ui.horizontal_wrapped(|ui| {
-        for (key, label) in TABS {
-            if ui.selectable_label(tab == *key, *label).clicked() {
-                save(app, "tab", key);
-            }
+    style::scope(ui, MARGIN, |ui| {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        let tab = current_tab(app);
+        header(app, ui, &tab);
+        if let Some(key) = style::tab_bar(ui, TABS, &tab) {
+            save(app, "tab", key);
         }
+        let tab = current_tab(app);
+        // Phần thân cuộn được khi cao hơn cửa sổ (`.body` của DanCard); mỗi tab nhớ chỗ cuộn của nó
+        // như mỗi tab của DanCard.
+        let max_h = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 48.0).max(160.0);
+        egui::ScrollArea::vertical().id_salt(("dancard-body", tab.as_str())).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.add_space(4.0);
+            match tab.as_str() {
+                "rename" => rename_tab(app, ui),
+                "cutmarks" => cut_marks_tab(app, ui),
+                "autosave" => auto_save_tab(app, ui),
+                "catalogue" => catalogue_tab(app, ui),
+                "toiuu" => toi_uu_tab(app, ui),
+                "danmau" => mau::section(app, ui),
+                "offset" => ctl::section(app, ui),
+                "variable" => variable::section(app, ui),
+                "measure" => transform_tab(app, ui),
+                _ => layout_tab(app, ui),
+            }
+            ui.add_space(4.0);
+        });
+        style::footer(ui, &format!("DanCard trên VectorCraft {}", env!("CARGO_PKG_VERSION")));
     });
-    widgets::divider(ui);
-    match tab.as_str() {
-        "rename" => rename_tab(app, ui),
-        "cutmarks" => cut_marks_tab(app, ui),
-        "danfile" => layout_tab(app, ui),
-        "autosave" => auto_save_tab(app, ui),
-        "catalogue" => catalogue_tab(app, ui),
-        "toiuu" => toi_uu_tab(app, ui),
-        "danmau" => mau::section(app, ui),
-        "offset" => ctl::section(app, ui),
-        "variable" => variable::section(app, ui),
-        _ => transform_tab(app, ui),
-    }
+}
+
+/// Tab đang mở (một khóa của [`TABS`]; mặc định Dàn file như DanCard).
+fn current_tab(app: &VectorcraftApp) -> String {
+    let tab = saved(app, "tab", "danfile");
+    if TABS.iter().any(|(k, _)| *k == tab) { tab } else { "danfile".into() }
 }
 
 // ---------------------------------------------------------------- giá trị đã gõ
@@ -150,38 +166,167 @@ fn saved_bool(app: &VectorcraftApp, key: &str, default: bool) -> bool {
     app.ui.dancard.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-/// Ô chữ một dòng gắn với giá trị đã lưu `key`; trả giá trị hiện có.
-fn text_box(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, default: &str, width: f32) -> String {
-    let cur = saved(app, key, default);
-    match widgets::exact_text_field(ui, ("dancard-field", key), &cur, width) {
-        Some(v) => {
-            save(app, key, v.trim());
-            v.trim().to_string()
-        }
-        None => cur,
+/// Ô nhập gắn với giá trị đã lưu `key`, rộng hết chỗ (`center`: ô số căn giữa) → giá trị, đã bỏ
+/// khoảng trắng hai đầu. Gõ đến đâu lưu đến đó.
+fn edit_box(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, default: &str, center: bool, placeholder: &str) -> String {
+    let w = ui.available_width();
+    edit_box_width(app, ui, key, default, center, placeholder, w)
+}
+
+/// [`edit_box`] rộng `width`.
+fn edit_box_width(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, default: &str, center: bool, placeholder: &str, width: f32) -> String {
+    let mut cur = saved(app, key, default);
+    if style::input(ui, egui::Id::new(("dancard-field", key)), &mut cur, width, center, placeholder).changed() {
+        save(app, key, &cur);
     }
+    cur.trim().to_string()
+}
+
+/// Ô số (căn giữa) gắn với `key`.
+fn num_box(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, default: &str) -> String {
+    edit_box(app, ui, key, default, true, "")
+}
+
+/// Ô chữ (căn trái) gắn với `key`; trống thì hiện `placeholder`.
+fn text_box(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, default: &str, placeholder: &str) -> String {
+    edit_box(app, ui, key, default, false, placeholder)
+}
+
+/// Ô chữ gắn với `key` có chữ đơn vị `unit` bên phải (`.size-row` của DanCard: "5 hộp").
+fn text_box_unit(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, default: &str, placeholder: &str, unit: &str) -> String {
+    let mut out = String::new();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let unit_w = ui.painter().layout_no_wrap(unit.to_string(), egui::FontId::proportional(13.0), style::INK_DIM).size().x;
+        let w = (ui.available_width() - unit_w - 8.0).max(60.0);
+        out = edit_box_width(app, ui, key, default, false, placeholder, w);
+        ui.label(egui::RichText::new(unit).size(13.0).color(style::INK_DIM));
+    });
+    out
+}
+
+/// Nhãn rồi hai ô rộng × cao trên một hàng (`.size-row` của DanCard); `w`, `h`: (khóa, mặc định)
+/// → (rộng, cao).
+fn size_pair(app: &mut VectorcraftApp, ui: &mut Ui, label: &str, w: (&str, &str), h: (&str, &str)) -> (String, String) {
+    const GAP: f32 = 8.0;
+    style::label(ui, label);
+    let times_w = ui.painter().layout_no_wrap("×".into(), egui::FontId::proportional(13.0), style::INK_DIM).size().x;
+    let field = ((ui.available_width() - times_w - 2.0 * GAP) / 2.0).max(40.0);
+    let mut out = (String::new(), String::new());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        out.0 = edit_box_width(app, ui, w.0, w.1, true, "rộng", field);
+        ui.label(egui::RichText::new("×").size(13.0).color(style::INK_DIM));
+        out.1 = edit_box_width(app, ui, h.0, h.1, true, "cao", field);
+    });
+    out
+}
+
+/// Nhãn rồi ô số (`.field` của DanCard).
+fn num_field(app: &mut VectorcraftApp, ui: &mut Ui, label: &str, key: &str, default: &str) -> String {
+    style::label(ui, label);
+    num_box(app, ui, key, default)
+}
+
+/// Các ô số cạnh nhau chia đều bề ngang (`.field-row`): (nhãn, khóa, mặc định) → giá trị từng ô.
+fn num_fields<const N: usize>(app: &mut VectorcraftApp, ui: &mut Ui, fields: [(&str, &str, &str); N]) -> [String; N] {
+    let mut out: [String; N] = std::array::from_fn(|_| String::new());
+    // Nhãn dài xuống dòng thì nhãn cùng hàng chừa đủ chỗ: các ô thẳng hàng.
+    let w = style::column_width(ui, N);
+    let label_h = fields.iter().map(|(label, _, _)| style::label_height(ui, label, w)).fold(0.0, f32::max);
+    style::columns(ui, N, |ui, i| {
+        if let (Some((label, key, default)), Some(v)) = (fields.get(i), out.get_mut(i)) {
+            style::label_block(ui, label, label_h);
+            *v = num_box(app, ui, key, default);
+        }
+    });
+    out
 }
 
 /// Ô đánh dấu gắn với giá trị đã lưu `key`.
 fn check_box(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, label: &str, default: bool) -> bool {
     let on = saved_bool(app, key, default);
-    if widgets::check(ui, label, on, true) {
+    if style::check(ui, label, on, true).clicked() {
         app.ui.dancard.insert(key.into(), Value::Bool(!on));
         return !on;
     }
     on
 }
 
-/// Dãy nút chọn một trong `options` (giá trị, nhãn) gắn với `key`.
-fn choice_row(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, options: &[(&str, &str)], default: &str) -> String {
+/// Chọn một trong `options` (giá trị, nhãn) gắn với `key`: danh sách có khung (`list`, như
+/// `.radio-list` của DanCard) hay các ô trên một hàng → giá trị đang chọn.
+fn choice(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, options: &[(&str, &str)], default: &str, list: bool) -> String {
     let cur = saved(app, key, default);
-    let mut out = cur.clone();
-    for (v, label) in options {
-        if widgets::radio(ui, label, cur == *v, true) {
-            save(app, key, v);
-            out = v.to_string();
-        }
+    let labels: Vec<&str> = options.iter().map(|o| o.1).collect();
+    let at = options.iter().position(|o| o.0 == cur);
+    let clicked = if list { style::radio_list(ui, key, &labels, at) } else { style::segmented(ui, key, &labels, at) };
+    if let Some((v, _)) = clicked.and_then(|i| options.get(i)) {
+        save(app, key, v);
+        return (*v).to_string();
     }
+    cur
+}
+
+/// Mục gập (`.acc`) có trạng thái mở / thu giữ lại theo `key`.
+fn accordion(app: &mut VectorcraftApp, ui: &mut Ui, key: &str, title: &str, default_open: bool, add: impl FnOnce(&mut VectorcraftApp, &mut Ui)) {
+    let state = format!("acc.{key}");
+    let open = saved_bool(app, &state, default_open);
+    if style::accordion_head(ui, title, open) {
+        app.ui.dancard.insert(state, Value::Bool(!open));
+    }
+    if open {
+        style::accordion_body(ui, |ui| add(app, ui));
+    }
+}
+
+/// Đã chọn object chưa (các lệnh cần vùng chọn).
+fn has_selection(app: &VectorcraftApp) -> bool {
+    app.session.active().is_some_and(|st| !st.selection.objects.is_empty())
+}
+
+/// Tên file của đường dẫn `path`.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Dòng file đã chọn (`key`): tên file trong khung (rê chuột: cả đường dẫn), nút Chọn… và Bỏ.
+fn file_row(app: &mut VectorcraftApp, ui: &mut Ui, key: &'static str, empty: &str, filter: (&'static str, &'static [&'static str])) {
+    let path = saved(app, key, "");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let pick = style::button(ui, "Chọn…", true, false);
+        let clear = !path.is_empty() && style::button(ui, "Bỏ", true, false).clicked();
+        let shown = if path.is_empty() { empty.to_string() } else { file_name(&path).to_string() };
+        style::text(ui, &shown).on_hover_text(&path);
+        if pick.clicked() {
+            crate::picks::button(app, move |app| {
+                let pick = crate::FilePick { filters: vec![filter], ..Default::default() };
+                if let Some(p) = crate::picks::open(app, &pick) {
+                    save(app, key, &p);
+                }
+            });
+        }
+        if clear {
+            save(app, key, "");
+        }
+    });
+}
+
+/// Ô thư mục (`key`, gõ được) và nút Chọn… bên phải.
+fn folder_row(app: &mut VectorcraftApp, ui: &mut Ui, key: &'static str, placeholder: &str) -> String {
+    let mut out = String::new();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let w = (ui.available_width() - style::button_width(ui, "Chọn…") - 6.0).max(60.0);
+        out = edit_box_width(app, ui, key, "", false, placeholder, w);
+        if style::button(ui, "Chọn…", true, false).clicked() {
+            crate::picks::button(app, move |app| {
+                if let Some(f) = crate::picks::folder(app) {
+                    save(app, key, &f);
+                }
+            });
+        }
+    });
     out
 }
 
@@ -219,29 +364,26 @@ fn count_prefix(text: &str) -> Option<(&str, &str)> {
 }
 
 /// Ô kết quả như `showCountResult` của DanCard: "[[COUNT:n]] …" thành dòng đậm "n con / tờ" rồi
-/// ghi chú; lỗi và thông báo khác như `show_note`.
-fn show_count_note(ui: &mut Ui, area: &str, t: &Tokens, hint: &str) {
+/// ghi chú; lỗi và thông báo khác như [`show_note`].
+fn show_count_note(ui: &mut Ui, area: &str, hint: &str) {
     let Note(text, err) = pstate::<Note>(ui.ctx(), &note_id(area));
     if !err && let Some((n, rest)) = count_prefix(&text) {
-        ui.label(RichText::new(format!("{n} con / tờ")).strong().color(t.text));
-        if !rest.is_empty() {
-            ui.label(RichText::new(rest).color(t.text));
-        }
+        style::output(ui, style::Out::Count(n, rest));
         return;
     }
-    show_note(ui, area, t, hint);
+    show_note(ui, area, hint);
 }
 
-fn show_note(ui: &mut Ui, area: &str, t: &Tokens, hint: &str) {
+/// Ô kết quả của vùng `area` (`.out`): chưa chạy thì lời nhắc `hint` (trống: không có ô).
+fn show_note(ui: &mut Ui, area: &str, hint: &str) {
     let Note(text, err) = pstate::<Note>(ui.ctx(), &note_id(area));
     if text.is_empty() {
         if !hint.is_empty() {
-            ui.label(RichText::new(hint).color(t.text_dim));
+            style::output(ui, style::Out::Hint(hint));
         }
         return;
     }
-    let color = if err { Color32::from_rgb(0xe5, 0x4b, 0x4b) } else { t.text };
-    ui.label(RichText::new(text).color(color));
+    style::output(ui, if err { style::Out::Error(&text) } else { style::Out::Done(&text) });
 }
 
 // ---------------------------------------------------------------- đầu panel: Raster, Resize, Clip
@@ -255,79 +397,116 @@ enum Popover {
     Clip,
 }
 
-fn header(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    let mut open = pstate::<Popover>(ui.ctx(), "dancard-popover");
+/// Hàng nhập khổ của bảng Clip / Resize (`.clip-pop-row` của DanCard): rộng × cao rồi đơn vị, các
+/// giá trị lưu theo `prefix` → (rộng, cao, đơn vị).
+fn size_row(app: &mut VectorcraftApp, ui: &mut Ui, prefix: &str) -> (String, String, String) {
+    const UNIT_W: f32 = 96.0;
+    const GAP: f32 = 6.0;
+    const FIELD_MIN: f32 = 40.0;
+    let units = [("cm", "cm"), ("mm", "mm"), ("in", "in")];
+    let times_w = ui.painter().layout_no_wrap("×".into(), egui::FontId::proportional(13.0), style::INK_DIM).size().x;
+    // Panel hẹp (cột dock kéo nhỏ): đơn vị xuống hàng dưới, các ô không tràn ra ngoài.
+    let one_row = ui.available_width() >= 2.0 * FIELD_MIN + times_w + UNIT_W + 3.0 * GAP;
+    let unit_room = if one_row { UNIT_W + GAP } else { 0.0 };
+    let field = ((ui.available_width() - unit_room - times_w - 2.0 * GAP) / 2.0).max(24.0);
+    let mut out = (String::new(), String::new(), String::new());
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Công cụ bình").strong().color(t.text));
-        ui.add_space(6.0);
-        let raster =
-            ui.add_enabled(has_selection, egui::Button::new("Raster")).on_hover_text("Raster CMYK · 500 ppi · nền trong suốt, đúng khung nhìn thấy");
-        if raster.clicked() {
-            run_and_note(app, ui, "header", "dancard.rasterize", json!({}));
-            open = Popover::None;
-        }
-        let resize = ui.add_enabled(has_selection, egui::Button::new("Resize").selected(open == Popover::Resize));
-        if resize.on_hover_text("Resize theo kích thước nhập, giữ tâm").clicked() {
-            open = if open == Popover::Resize { Popover::None } else { Popover::Resize };
-        }
-        let clip = ui.add_enabled(has_selection, egui::Button::new("Clip").selected(open == Popover::Clip));
-        if clip.on_hover_text("Clip canh giữa theo kích thước nhập").clicked() {
-            open = if open == Popover::Clip { Popover::None } else { Popover::Clip };
+        ui.spacing_mut().item_spacing.x = GAP;
+        out.0 = edit_box_width(app, ui, &format!("{prefix}W"), "5", true, "", field);
+        ui.label(egui::RichText::new("×").size(13.0).color(style::INK_DIM));
+        out.1 = edit_box_width(app, ui, &format!("{prefix}H"), "5", true, "", field);
+        if one_row {
+            out.2 = ui.allocate_ui(egui::vec2(UNIT_W, 32.0), |ui| choice(app, ui, &format!("{prefix}Unit"), &units, "cm", false)).inner;
         }
     });
+    if !one_row {
+        out.2 = choice(app, ui, &format!("{prefix}Unit"), &units, "cm", false);
+    }
+    out
+}
+
+fn header(app: &mut VectorcraftApp, ui: &mut Ui, tab: &str) {
+    let selected = has_selection(app);
+    let mut open = pstate::<Popover>(ui.ctx(), "dancard-popover");
+    let buttons = |app: &mut VectorcraftApp, ui: &mut Ui, open: &mut Popover| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        // Phải sang trái: Clip, Resize, Raster.
+        let clip = style::header_button(ui, "Clip", selected, *open == Popover::Clip).on_hover_text("Clip canh giữa theo kích thước nhập");
+        if clip.clicked() {
+            *open = if *open == Popover::Clip { Popover::None } else { Popover::Clip };
+        }
+        let resize = style::header_button(ui, "Resize", selected, *open == Popover::Resize).on_hover_text("Resize theo kích thước nhập, giữ tâm");
+        if resize.clicked() {
+            *open = if *open == Popover::Resize { Popover::None } else { Popover::Resize };
+        }
+        let raster =
+            style::header_button(ui, "Raster", selected, false).on_hover_text("Raster CMYK · 500 ppi · nền trong suốt, đúng khung nhìn thấy");
+        if raster.clicked() {
+            run_and_note(app, ui, "header", "dancard.rasterize", json!({}));
+            *open = Popover::None;
+        }
+    };
+    // Tên và các nút trên một hàng khi đủ chỗ, không thì các nút xuống hàng dưới.
+    let title_w = ui.painter().layout_no_wrap("Công cụ bình".into(), crate::theme::semibold(14.0), style::INK).size().x;
+    let one_row = ui.available_width() >= 18.0 + 8.0 + title_w + 8.0 + 3.0 * 54.0 + 12.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        style::logo(ui, 18.0);
+        style::brand(ui, "Công cụ bình");
+        if one_row {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| buttons(app, ui, &mut open));
+        }
+    });
+    if !one_row {
+        // Một hàng cao đúng cỡ nút (`with_layout` ngang trong cột dọc chiếm hết chiều cao còn lại
+        // và đặt nút ở giữa nó).
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            buttons(app, ui, &mut open)
+        });
+    }
     if open != Popover::None {
         let (title, prefix, command, ok) = match open {
             Popover::Resize => ("Resize kích thước (giữ tâm)", "resize", "dancard.resize", "Resize"),
             _ => ("Clip kích thước (canh giữa)", "clip", "dancard.clipToSize", "OK"),
         };
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(RichText::new(title).color(t.text));
-            ui.horizontal(|ui| {
-                let w = text_box(app, ui, &format!("{prefix}W"), "5", 56.0);
-                ui.label("×");
-                let h = text_box(app, ui, &format!("{prefix}H"), "5", 56.0);
-                let unit = saved(app, &format!("{prefix}Unit"), "cm");
-                let units = ["cm", "mm", "in"];
-                if let Some(i) = widgets::dropdown(ui, ("dancard-unit", prefix), &unit, &units, 56.0) {
-                    save(app, &format!("{prefix}Unit"), units.get(i).copied().unwrap_or("cm"));
-                }
-                let unit = saved(app, &format!("{prefix}Unit"), "cm");
-                ui.horizontal(|ui| {
-                    if ui.button("Huỷ").clicked() {
-                        open = Popover::None;
-                    }
-                    if ui.add_enabled(has_selection, egui::Button::new(ok)).clicked() {
-                        let mut params = json!({"width": w, "height": h, "unit": unit});
-                        if open == Popover::Clip {
-                            params["followAngle"] = json!(saved_bool(app, "clipFollowAngle", true));
-                        }
-                        if run_and_note(app, ui, "header", command, params).is_some() {
-                            open = Popover::None;
-                        }
-                    }
-                });
-            });
+        style::popover(ui, title, |ui| {
+            let (w, h, unit) = size_row(app, ui, prefix);
             if open == Popover::Clip {
                 check_box(app, ui, "clipFollowAngle", "Khung clip theo khung transform (card xoay, đặt nghiêng)", true);
             }
+            style::columns(ui, 2, |ui, i| {
+                if i == 0 {
+                    if style::button(ui, "Huỷ", true, true).clicked() {
+                        open = Popover::None;
+                    }
+                } else if style::primary(ui, ok, selected).clicked() {
+                    let mut params = json!({"width": w, "height": h, "unit": unit});
+                    if open == Popover::Clip {
+                        params["followAngle"] = json!(saved_bool(app, "clipFollowAngle", true));
+                    }
+                    if run_and_note(app, ui, "header", command, params).is_some() {
+                        open = Popover::None;
+                    }
+                }
+            });
         });
     }
     set_pstate(ui.ctx(), "dancard-popover", open);
-    show_note(ui, "header", &t, "");
+    // Tác giả, người thử (Duẫn ở tab CTL Offset, như DanCard).
+    style::credits(ui, tab == "offset");
+    show_note(ui, "header", "");
 }
 
-// ---------------------------------------------------------------- tab Dàn card
+// ---------------------------------------------------------------- tab Dàn file
 
-/// Các loại card của tab Dàn card: (khóa, nhãn, rộng mm, cao mm, voucher).
+/// Các loại card của tab Dàn file: (khóa, nhãn, rộng mm, cao mm, voucher).
 const CARD_LAYOUTS: &[(&str, &str, &str, &str, bool)] = &[
-    ("9.2x5.6", "9.2 x 5.6  (20 chỗ)", "92", "56", false),
-    ("9x5.5", "9 x 5.5  (20 chỗ)", "90", "55", false),
-    ("9.2x5.2", "9.2 x 5.2  (21 chỗ)", "92", "52", false),
-    ("8.7x5.5", "8.7 x 5.5  (22 chỗ)", "87", "55", false),
-    ("10.2x15.2", "10.2 x 15.2  (6 chỗ)", "152", "102", false),
-    ("15.2x7.2", "15.2 x 7.2  (voucher, 8 chỗ)", "152", "72", true),
+    ("9.2x5.6", "9.2 × 5.6  (20 chỗ)", "92", "56", false),
+    ("9x5.5", "9 × 5.5  (20 chỗ)", "90", "55", false),
+    ("9.2x5.2", "9.2 × 5.2  (21 chỗ)", "92", "52", false),
+    ("8.7x5.5", "8.7 × 5.5  (22 chỗ)", "87", "55", false),
+    ("10.2x15.2", "10.2 × 15.2  (6 chỗ)", "152", "102", false),
+    ("15.2x7.2", "15.2 × 7.2  (voucher, 8 chỗ)", "152", "72", true),
 ];
 
 /// File pon chung của DanCard trên Illustrator: `dan_card_config_path.txt` trong thư mục dữ liệu
@@ -350,86 +529,53 @@ fn legacy_pon_path() -> Option<String> {
 }
 
 fn layout_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let label = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    label(ui, "Loại card");
-    let cur = saved(app, "cardLayout", "9.2x5.6");
-    for (key, name, w, h, _) in CARD_LAYOUTS {
-        if widgets::radio(ui, name, cur == *key, true) && cur != *key {
+    accordion(app, ui, "card", "Dàn Card", true, |app, ui| {
+        style::label(ui, "Loại card");
+        let cur = saved(app, "cardLayout", "9.2x5.6");
+        let names: Vec<&str> = CARD_LAYOUTS.iter().map(|l| l.1).collect();
+        let at = CARD_LAYOUTS.iter().position(|l| l.0 == cur);
+        if let Some((key, _, w, h, _)) = style::radio_list(ui, "cardLayout", &names, at).and_then(|i| CARD_LAYOUTS.get(i))
+            && cur != *key
+        {
             save(app, "cardLayout", key);
             // Đổi loại card: khổ thẻ về khổ của loại đó.
             save(app, "cardW", w);
             save(app, "cardH", h);
         }
-    }
-    let key = saved(app, "cardLayout", "9.2x5.6");
-    let (_, _, dw, dh, voucher) = CARD_LAYOUTS.iter().find(|l| l.0 == key).copied().unwrap_or(CARD_LAYOUTS[0]);
-    let with_card = voucher && check_box(app, ui, "voucherCard", "Ghép thêm card 9.2×5.6", false);
-    ui.add_space(4.0);
-    let (mut w, mut h, mut gap) = (String::new(), String::new(), String::new());
-    egui::Grid::new("dancard-layout").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
-        for s in ["Rộng thẻ (mm)", "Cao thẻ (mm)", "Khe khối (mm)"] {
-            label(ui, s);
-        }
-        ui.end_row();
-        w = text_box(app, ui, "cardW", dw, 56.0);
-        h = text_box(app, ui, "cardH", dh, 56.0);
-        gap = text_box(app, ui, "cardGap", "2", 56.0);
-        ui.end_row();
-    });
-    label(ui, "Chiều xoay thẻ dọc");
-    let rot = ui.horizontal(|ui| choice_row(app, ui, "cardRot", &[("90", "90°"), ("-90", "-90°")], "90")).inner;
-    label(ui, "Loại in");
-    let kind = ui.horizontal(|ui| choice_row(app, ui, "cardKind", &[("fast", "In nhanh"), ("offset", "Cardoffset")], "fast")).inner;
-    let note = if kind == "offset" {
-        label(ui, "Ghi chú (cardoffset)");
-        text_box(app, ui, "cardNote", "cardoffset - cán mờ - bỏ hộp nhựa", 220.0)
-    } else {
-        String::new()
-    };
-    ui.add_space(4.0);
-    // File pon chung: đã chọn, hoặc lấy từ config của DanCard trên Illustrator.
-    let mut pon = saved(app, "ponPath", "");
-    if pon.is_empty() && !saved_bool(app, "ponLegacyChecked", false) {
-        app.ui.dancard.insert("ponLegacyChecked".into(), Value::Bool(true));
-        if let Some(p) = legacy_pon_path() {
-            save(app, "ponPath", &p);
-            pon = p;
-        }
-    }
-    label(ui, "File pon chung (artboard + pon)");
-    ui.horizontal(|ui| {
-        let shown = if pon.is_empty() {
-            "(chưa chọn: dùng artboard sẵn có)".to_string()
+        let key = saved(app, "cardLayout", "9.2x5.6");
+        let (_, _, dw, dh, voucher) =
+            CARD_LAYOUTS.iter().find(|l| l.0 == key).or(CARD_LAYOUTS.first()).copied().unwrap_or(("", "", "92", "56", false));
+        let with_card = voucher && check_box(app, ui, "voucherCard", "Ghép thêm card 9.2×5.6", false);
+        let [w, h, gap] = num_fields(app, ui, [("Rộng thẻ (mm)", "cardW", dw), ("Cao thẻ (mm)", "cardH", dh), ("Khe khối (mm)", "cardGap", "2")]);
+        style::label(ui, "Chiều xoay thẻ dọc");
+        let rot = choice(app, ui, "cardRot", &[("90", "90°"), ("-90", "-90°")], "90", false);
+        style::label(ui, "Loại in");
+        let kind = choice(app, ui, "cardKind", &[("fast", "In nhanh"), ("offset", "Cardoffset")], "fast", false);
+        let note = if kind == "offset" {
+            style::label(ui, "Ghi chú (cardoffset)");
+            text_box(app, ui, "cardNote", "cardoffset - cán mờ - bỏ hộp nhựa", "")
         } else {
-            pon.rsplit(['/', '\\']).next().unwrap_or(&pon).to_string()
+            String::new()
         };
-        ui.label(RichText::new(shown).color(t.text)).on_hover_text(&pon);
-        if ui.button("Chọn…").clicked() {
-            crate::picks::button(app, |app| {
-                let pick = crate::FilePick { filters: vec![("File pon", &["ai", "pdf", "eps", "svg"])], ..Default::default() };
-                if let Some(p) = crate::picks::open(app, &pick) {
-                    save(app, "ponPath", &p);
-                }
+        // File pon chung: đã chọn, hoặc lấy từ config của DanCard trên Illustrator.
+        if saved(app, "ponPath", "").is_empty() && !saved_bool(app, "ponLegacyChecked", false) {
+            app.ui.dancard.insert("ponLegacyChecked".into(), Value::Bool(true));
+            if let Some(p) = legacy_pon_path() {
+                save(app, "ponPath", &p);
+            }
+        }
+        style::label(ui, "File pon chung (artboard + pon)");
+        file_row(app, ui, "ponPath", "Chưa chọn: dùng artboard sẵn có", ("File pon", &["ai", "pdf", "eps", "svg"]));
+        if style::primary(ui, "Dàn card", has_selection(app)).clicked() {
+            let params = json!({
+                "layout": key, "voucherWithCard": with_card, "width": w, "height": h, "gap": gap,
+                "rotation": rot, "offset": kind == "offset", "note": note,
+                "pon": saved(app, "ponPath", ""),
             });
+            run_and_note(app, ui, "danfile", "dancard.layout", params);
         }
-        if !pon.is_empty() && ui.button("Bỏ").clicked() {
-            save(app, "ponPath", "");
-        }
+        show_note(ui, "danfile", "Chọn loại card rồi bấm Dàn.");
     });
-    ui.add_space(6.0);
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    if ui.add_enabled(has_selection, egui::Button::new("Dàn card")).clicked() {
-        let params = json!({
-            "layout": key, "voucherWithCard": with_card, "width": w, "height": h, "gap": gap,
-            "rotation": rot, "offset": kind == "offset", "note": note,
-            "pon": saved(app, "ponPath", ""),
-        });
-        run_and_note(app, ui, "danfile", "dancard.layout", params);
-    }
-    show_note(ui, "danfile", &t, "Chọn loại card rồi bấm Dàn.");
 }
 
 // ---------------------------------------------------------------- tab Auto Save
@@ -459,199 +605,144 @@ fn auto_save_name(prefix: &str, stt: u64, pad: usize, boxes: &str, note: &str, l
     format!("{prefix} - {stt:0pad$} - {boxes} hop{note} - {lamination} - {date}.pdf")
 }
 
+/// Mã bắt buộc của Auto Save (ô khóa của DanCard).
+const AUTO_SAVE_PREFIX: &str = "1088";
+
 fn auto_save_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let label = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    label(ui, "Xếp hàng: trái = trước, phải = sau. Một mặt lưu PDF 1 trang; hai mặt lưu 2 trang. Không sửa file gốc.");
-    ui.add_space(4.0);
-    label(ui, "Mã bắt buộc");
-    let prefix = text_box(app, ui, "asPrefix", "1088", 120.0);
-    let (mut start, mut pad) = (String::new(), String::new());
-    egui::Grid::new("dancard-autosave").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-        label(ui, "STT bắt đầu");
-        label(ui, "Đệm số 0");
-        ui.end_row();
-        start = text_box(app, ui, "asStart", "1", 64.0);
-        pad = text_box(app, ui, "asPad", "2", 64.0);
-        ui.end_row();
-    });
-    label(ui, "Số hộp (nhiều số ngăn bằng dấu phẩy)");
-    let boxes = text_box(app, ui, "asHop", "5", 160.0);
-    let in_order = check_box(app, ui, "asHopTheoThuTu", "Ghép số hộp theo thứ tự từng con", false);
-    label(ui, "Ghi chú (tuỳ chọn)");
-    let note = text_box(app, ui, "asNote", "", 200.0);
-    label(ui, "Cán màng");
-    let lamination = ui.horizontal(|ui| choice_row(app, ui, "asCanMang", &[("cm", "cm — cán màng"), ("km", "km — không màng")], "cm")).inner;
-    label(ui, "Ngày đặt in");
+    style::hint(ui, "Xếp hàng: trái = trước, phải = sau. Một mặt lưu PDF 1 trang; hai mặt lưu 2 trang. Không sửa file gốc.");
+    style::label(ui, "Mã bắt buộc");
+    style::locked(ui, AUTO_SAVE_PREFIX);
+    let [start, pad] = num_fields(app, ui, [("STT bắt đầu", "asStart", "1"), ("Đệm số 0", "asPad", "2")]);
+    style::hint(ui, "Đệm 2: 01, 02…; đệm 0: 1, 2…");
+    style::label(ui, "Số hộp");
+    let boxes = text_box_unit(app, ui, "asHop", "5", "5", "hộp");
+    style::hint(ui, "Ngăn nhiều số bằng dấu phẩy. Mặc định: mỗi con × mỗi số.");
+    let in_order = check_box(app, ui, "asHopTheoThuTu", "Ghép số hộp theo thứ tự từng con (thay vì mỗi con × mỗi số)", false);
+    style::hint(ui, "Tick: một số cho một con theo thứ tự; số lượng phải bằng nhau.");
+    style::label(ui, "Ghi chú (tuỳ chọn)");
+    let note = text_box(app, ui, "asNote", "", "để trống nếu không cần");
+    style::hint(ui, "Thêm vào tên file nếu có nhập.");
+    style::label(ui, "Cán màng");
+    let lamination = choice(app, ui, "asCanMang", &[("cm", "cm — cán màng"), ("km", "km — không màng")], "cm", false);
+    style::label(ui, "Ngày đặt in");
     // Ngày mặc định là hôm nay mỗi lần mở app; sửa tay thì giữ trong phiên.
     if pstate::<String>(ui.ctx(), "dancard-asNgay-set").is_empty() {
         save(app, "asNgay", &today_day());
         set_pstate(ui.ctx(), "dancard-asNgay-set", "1".to_string());
     }
-    let date = text_box(app, ui, "asNgay", "", 64.0);
-    label(ui, "Thư mục lưu");
-    let folder = saved(app, "asFolder", "");
-    ui.horizontal(|ui| {
-        let shown = if folder.is_empty() { "(chưa chọn)".to_string() } else { folder.clone() };
-        ui.label(RichText::new(shown).color(t.text));
-        if ui.button("Chọn…").clicked() {
-            crate::picks::button(app, |app| {
-                if let Some(f) = crate::picks::folder(app) {
-                    save(app, "asFolder", &f);
-                }
-            });
-        }
-    });
-    label(ui, "Xem trước tên file");
+    let date = num_box(app, ui, "asNgay", "");
+    style::label(ui, "Thư mục lưu (bỏ trống = hỏi khi chạy)");
+    let folder = folder_row(app, ui, "asFolder", "vd: D:\\PDF\\1088");
+    style::label(ui, "Xem trước tên file");
     let pad_n = pad.parse::<usize>().unwrap_or(0).min(8);
     let start_n = start.parse::<u64>().unwrap_or(1);
     let list: Vec<&str> = boxes.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
     let list = if list.is_empty() { vec![""] } else { list };
-    for (k, b) in list.iter().take(4).enumerate() {
-        ui.label(RichText::new(auto_save_name(&prefix, start_n + k as u64, pad_n, b, &note, &lamination, &date)).monospace().color(t.text));
+    let names: Vec<String> = list
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(k, b)| auto_save_name(AUTO_SAVE_PREFIX, start_n + k as u64, pad_n, b, &note, &lamination, &date))
+        .collect();
+    style::output(ui, style::Out::Hint(&names.join("\n")));
+    let selected = has_selection(app);
+    if style::button(ui, "Clip 9.2 × 5.6 (tự xoay)", selected, true).clicked() {
+        run_and_note(app, ui, "clipcard", "dancard.clipCard", json!({}));
     }
-    ui.add_space(6.0);
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    if ui.add_enabled(has_selection, egui::Button::new("Clip 9.2 × 5.6 (tự xoay)")).clicked() {
-        run_and_note(app, ui, "autosave", "dancard.clipCard", json!({}));
-    }
-    if ui.add_enabled(has_selection, egui::Button::new("OK — Auto Save PDF")).clicked() {
+    show_note(ui, "clipcard", "");
+    if style::primary(ui, "OK — Auto Save PDF", selected).clicked() {
         let params = json!({
-            "prefix": prefix, "start": start, "pad": pad, "boxes": boxes, "boxesInOrder": in_order,
-            "note": note, "lamination": lamination, "date": date, "folder": saved(app, "asFolder", ""),
+            "prefix": AUTO_SAVE_PREFIX, "start": start, "pad": pad, "boxes": boxes, "boxesInOrder": in_order,
+            "note": note, "lamination": lamination, "date": date, "folder": folder,
         });
         run_and_note(app, ui, "autosave", "dancard.autoSavePdf", params);
     }
-    show_note(ui, "autosave", &t, "Chọn object rồi bấm OK.");
+    show_note(ui, "autosave", "Chọn object rồi bấm OK.");
 }
 
 // ---------------------------------------------------------------- tab Catalogue
 
 fn catalogue_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let label = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    ui.label(RichText::new("Dàn trang catalogue đóng gáy giữa").strong().color(t.text));
-    label(ui, "Chọn trang theo thứ tự đọc; số trang chia hết cho 4.");
-    label(ui, "Kích thước 1 trang (cm)");
-    let (w, h) = ui
-        .horizontal(|ui| {
-            let w = text_box(app, ui, "catW", "21.1", 56.0);
-            ui.label("×");
-            let h = text_box(app, ui, "catH", "29.9", 56.0);
-            (w, h)
-        })
-        .inner;
-    label(ui, "Tự chọn 2 cuốn/tờ; không vừa thì 1 cuốn/tờ.");
-    label(ui, "Ghi chú BÌA (artboard 1)");
-    let cover = text_box(app, ui, "catCoverNote", "", 220.0);
-    label(ui, "Ghi chú RUỘT (tự thêm RUỘT 1, RUỘT 2…)");
-    let inside = text_box(app, ui, "catInsideNote", "", 220.0);
-    ui.add_space(6.0);
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    if ui.add_enabled(has_selection, egui::Button::new("Dàn Catalogue")).clicked() {
+    style::label(ui, "Dàn trang catalogue đóng gáy giữa");
+    style::hint(ui, "Chọn trang theo thứ tự đọc; số trang chia hết cho 4.");
+    let (w, h) = size_pair(app, ui, "Kích thước 1 trang (cm)", ("catW", "21.1"), ("catH", "29.9"));
+    style::hint(ui, "Tự chọn 2 cuốn/tờ; không vừa thì 1 cuốn/tờ.");
+    style::label(ui, "Ghi chú BÌA (artboard 1)");
+    let cover = text_box(app, ui, "catCoverNote", "", "");
+    style::label(ui, "Ghi chú RUỘT (tự thêm RUỘT 1, RUỘT 2…)");
+    let inside = text_box(app, ui, "catInsideNote", "", "");
+    if style::primary(ui, "Dàn Catalogue", has_selection(app)).clicked() {
         run_and_note(app, ui, "catalogue", "dancard.catalogue", json!({"width": w, "height": h, "coverNote": cover, "insideNote": inside}));
     }
-    show_note(ui, "catalogue", &t, "Chọn trang rồi bấm Dàn Catalogue.");
+    show_note(ui, "catalogue", "Chọn trang rồi bấm Dàn Catalogue.");
 }
 
 // ---------------------------------------------------------------- tab Dàn tối ưu
 
 /// Tab Dàn tối ưu: ba mục gập Dàn KTS, Dàn bế, Dàn Offset (như DanCard).
 fn toi_uu_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    egui::CollapsingHeader::new("Dàn KTS").id_salt("dancard-acc-kts").default_open(true).show(ui, |ui| kts::section(app, ui));
-    egui::CollapsingHeader::new("Dàn bế").id_salt("dancard-acc-be").show(ui, |ui| be::section(app, ui));
-    egui::CollapsingHeader::new("Dàn Offset").id_salt("dancard-acc-offset").show(ui, |ui| tutro::section(app, ui));
+    accordion(app, ui, "kts", "Dàn KTS", true, kts::section);
+    accordion(app, ui, "be", "Dàn bế", false, be::section);
+    accordion(app, ui, "offset", "Dàn Offset", false, tutro::section);
 }
 
 // ---------------------------------------------------------------- tab Dấu cắt
 
 fn cut_marks_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    ui.label(RichText::new("Dấu cắt tự động").strong().color(t.text));
-    ui.label(RichText::new("Chọn bài hoặc group đã dàn.").color(t.text_dim));
-    let (mut length, mut gap, mut edge) = (String::new(), String::new(), String::new());
-    egui::Grid::new("dancard-cutmarks").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
-        for s in ["Dài nét (mm)", "Cách bài (mm)", "Ngưỡng mép (mm)"] {
-            ui.label(RichText::new(s).color(t.text_dim));
-        }
-        ui.end_row();
-        length = text_box(app, ui, "cutMarkLength", "1.4", 64.0);
-        gap = text_box(app, ui, "cutMarkGap", "0", 64.0);
-        edge = text_box(app, ui, "cutMarkEdge", "4", 64.0);
-        ui.end_row();
-    });
-    ui.add_space(6.0);
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    if ui.add_enabled(has_selection, egui::Button::new("Đánh dấu cắt")).clicked() {
+    style::label(ui, "Dấu cắt tự động");
+    style::hint(
+        ui,
+        "Chọn bài (group, clip group) hoặc cả tờ đã dàn: mỗi khối một bộ dấu cắt, không đánh quanh chi tiết bên trong. Chọn một chi tiết (giữ Ctrl) cũng tính cả bài chứa nó.",
+    );
+    let [length, gap, edge] = num_fields(
+        app,
+        ui,
+        [("Dài nét (mm)", "cutMarkLength", "1.4"), ("Cách bài (mm)", "cutMarkGap", "0"), ("Ngưỡng mép (mm)", "cutMarkEdge", "4")],
+    );
+    if style::primary(ui, "Đánh dấu cắt", has_selection(app)).clicked() {
         run_and_note(app, ui, "cutmarks", "dancard.cutMarks", json!({"length": length, "gap": gap, "edge": edge}));
     }
-    show_note(ui, "cutmarks", &t, "Chọn bài rồi đánh dấu cắt.");
+    show_note(ui, "cutmarks", "Chọn bài rồi đánh dấu cắt.");
 }
 
 // ---------------------------------------------------------------- tab Đổi tên
 
 fn rename_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
-    let label = |ui: &mut Ui, s: &str| {
-        ui.label(RichText::new(s).color(t.text_dim));
-    };
-    label(ui, "Tiền tố");
-    let prefix = text_box(app, ui, "rnPrefix", "s", 160.0);
-    ui.add_space(4.0);
-    label(ui, "Kiểu đánh");
-    let mode = choice_row(app, ui, "rnMode", &[("num", "Số: 1, 2, 3…"), ("low", "Chữ thường: a, b, c…"), ("up", "Chữ HOA: A, B, C…")], "num");
-    ui.add_space(4.0);
-    let (mut start, mut pad) = (String::new(), String::new());
-    egui::Grid::new("dancard-rename").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-        label(ui, "Bắt đầu");
-        label(ui, "Đệm số 0");
-        ui.end_row();
-        start = text_box(app, ui, "rnStart", "1", 72.0);
-        pad = text_box(app, ui, "rnPad", "0", 72.0);
-        ui.end_row();
-    });
-    label(ui, "Số layer lặp mỗi nhãn");
-    let repeat = text_box(app, ui, "rnRepeat", "1", 72.0);
-    ui.label(RichText::new("Lặp 2: s1, s1, s2, s2…").color(t.text_dim));
-    ui.add_space(4.0);
-    label(ui, "Hướng đếm");
-    let dir = choice_row(app, ui, "rnDir", &[("bottom", "Dưới cùng = đầu tiên"), ("top", "Trên cùng = đầu tiên")], "bottom");
-    ui.add_space(6.0);
-    let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
-    if ui.add_enabled(has_selection, egui::Button::new("Đổi tên")).clicked() {
+    style::label(ui, "Tiền tố");
+    let prefix = text_box(app, ui, "rnPrefix", "s", "");
+    style::label(ui, "Kiểu đánh");
+    let mode = choice(app, ui, "rnMode", &[("num", "Số: 1, 2, 3…"), ("low", "Chữ thường: a, b, c…"), ("up", "Chữ HOA: A, B, C…")], "num", true);
+    let [start, pad] = num_fields(app, ui, [("Bắt đầu", "rnStart", "1"), ("Đệm số 0", "rnPad", "0")]);
+    let repeat = num_field(app, ui, "Số layer lặp mỗi nhãn", "rnRepeat", "1");
+    style::hint(ui, "Lặp 2: s1, s1, s2, s2…");
+    style::label(ui, "Hướng đếm");
+    let dir = choice(app, ui, "rnDir", &[("bottom", "Dưới cùng = đầu tiên"), ("top", "Trên cùng = đầu tiên")], "bottom", true);
+    if style::primary(ui, "Đổi tên", has_selection(app)).clicked() {
         let params = json!({"prefix": prefix, "mode": mode, "start": start, "pad": pad, "repeat": repeat, "bottomUp": dir == "bottom"});
         run_and_note(app, ui, "rename", "dancard.rename", params);
     }
-    show_note(ui, "rename", &t, "Chọn object rồi bấm Đổi tên.");
+    show_note(ui, "rename", "Chọn object rồi bấm Đổi tên.");
 }
 
 // ---------------------------------------------------------------- tab Đo khung
 
 fn transform_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
-    let t = Tokens::get(ui.ctx());
     let unit = Some(pstate::<String>(ui.ctx(), "dancard-unit")).filter(|u| !u.is_empty()).unwrap_or_else(|| "cm".into());
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Đơn vị:").color(t.text_dim));
-        for u in ["cm", "mm", "pt"] {
-            if ui.selectable_label(unit == u, u).clicked() {
-                set_pstate(ui.ctx(), "dancard-unit", u.to_string());
-            }
-        }
-    });
-    widgets::divider(ui);
+    style::label(ui, "Đơn vị");
+    let units = ["cm", "mm", "pt"];
+    if let Some(u) = style::segmented(ui, "dancard-unit", &units, units.iter().position(|u| *u == unit)).and_then(|i| units.get(i)) {
+        set_pstate(ui.ctx(), "dancard-unit", (*u).to_string());
+    }
+    let unit = Some(pstate::<String>(ui.ctx(), "dancard-unit")).filter(|u| !u.is_empty()).unwrap_or_else(|| "cm".into());
     let preview = app.session.prefs.use_preview_bounds;
     let Some(st) = app.session.active() else {
-        widgets::dim_label(ui, "Chưa mở tài liệu.");
+        style::output(ui, style::Out::Hint("Chưa mở tài liệu."));
         return;
     };
     let selected: Vec<u64> = st.selection.objects.iter().map(|i| i.0).collect();
     let key = (std::sync::Arc::as_ptr(&st.doc) as usize, st.revision, selected, unit.clone(), preview);
     if key.2.is_empty() {
-        widgets::dim_label(ui, "Chọn card, clip group, group… để đọc khung transform.");
+        style::output(ui, style::Out::Hint("Chọn card, clip group, group… để đọc khung transform."));
         return;
     }
     let id = egui::Id::new("dancard-transform-cache");
@@ -665,37 +756,34 @@ fn transform_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
         }
     };
     let Some(sel) = value.get("selection").filter(|s| s.is_object()) else {
-        widgets::dim_label(ui, "Không đo được vùng chọn.");
+        style::output(ui, style::Out::Error("Không đo được vùng chọn."));
         return;
     };
     let count = value["count"].as_u64().unwrap_or(0);
-    ui.label(RichText::new(if count > 1 { format!("Cả vùng chọn ({count} object)") } else { "Object đang chọn".into() }).strong().color(t.text));
-    frame_rows(ui, sel, &unit, &t, "selection");
+    style::title(ui, &if count > 1 { format!("Cả vùng chọn ({count} object)") } else { "Object đang chọn".into() });
+    frame_rows(ui, sel, &unit);
     if count > 1
         && let Some(objects) = value["objects"].as_array()
     {
-        widgets::divider(ui);
-        egui::CollapsingHeader::new(format!("Từng object ({count})")).default_open(true).show(ui, |ui| {
-            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+        accordion(app, ui, "measureEach", &format!("Từng object ({count})"), true, |_, ui| {
+            egui::ScrollArea::vertical().id_salt("dancard-measure-each").max_height(220.0).show(ui, |ui| {
                 for (i, o) in objects.iter().enumerate() {
-                    ui.label(
-                        RichText::new(format!(
+                    style::mono(
+                        ui,
+                        &format!(
                             "{}. {}  {}°  {} × {}",
                             i + 1,
                             o["kind"].as_str().unwrap_or(""),
                             num(&o["angle"]),
                             num(&o["width"]),
                             num(&o["height"])
-                        ))
-                        .monospace()
-                        .color(t.text),
+                        ),
                     );
                 }
             });
         });
     }
-    widgets::divider(ui);
-    if ui.button("Sao chép số đo (JSON)").clicked() {
+    if style::button(ui, "Sao chép số đo (JSON)", true, true).clicked() {
         ui.ctx().copy_text(serde_json::to_string_pretty(&value).unwrap_or_default());
     }
 }
@@ -712,6 +800,7 @@ mod tests {
     fn hien_khung_xoay_cua_card_dang_chon() {
         let mut app = VectorcraftApp::new(Session::new(), Default::default());
         app.run("file.new", json!({"width": 600, "height": 400})).unwrap();
+        app.ui.dancard.insert("tab".into(), json!("measure"));
         // Card 9,2 × 5,6 cm xoay 20°.
         app.run("shape.rectangle", json!({"x": 100, "y": 100, "width": 260.787, "height": 158.740})).unwrap();
         app.run("object.rotate", json!({"angle": 20})).unwrap();
@@ -723,22 +812,45 @@ mod tests {
         assert!(painted_text(&mut app, super::show).contains("Chọn card"));
     }
 
-    /// Đầu panel có Raster, Resize, Clip; tab Đổi tên hiện các ô của nó, giá trị gõ vào được giữ.
+    /// Đầu panel có Raster, Resize, Clip, tác giả và người thử; tab theo thứ tự của DanCard; tab Đổi
+    /// tên hiện các ô của nó, giá trị gõ vào được giữ.
     #[test]
     fn dau_panel_va_tab_doi_ten() {
         let mut app = VectorcraftApp::new(Session::new(), Default::default());
         app.run("file.new", json!({"width": 600, "height": 400})).unwrap();
         app.run("shape.rectangle", json!({"x": 10, "y": 10, "width": 50, "height": 50})).unwrap();
         let text = painted_text(&mut app, super::show);
-        for s in ["Raster", "Resize", "Clip", "Đo khung", "Đổi tên"] {
+        for s in ["Công cụ bình", "Raster", "Resize", "Clip", "AUTHOR", "TESTER", "Đo khung", "Đổi tên", "Dàn Card", "LOẠI CARD"] {
             assert!(text.contains(s), "{s}: {text}");
         }
+        let order: Vec<usize> = super::TABS.iter().map(|(_, l)| text.find(l).unwrap_or_else(|| panic!("{l}: {text}"))).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "tab theo thứ tự của DanCard: {order:?}");
         app.ui.dancard.insert("tab".into(), json!("rename"));
         app.ui.dancard.insert("rnPrefix".into(), json!("card"));
         let text = painted_text(&mut app, super::show);
-        assert!(text.contains("Tiền tố") && text.contains("Hướng đếm"), "{text}");
+        assert!(text.contains("TIỀN TỐ") && text.contains("HƯỚNG ĐẾM"), "{text}");
         assert!(text.contains("card"), "giá trị đã lưu hiện trong ô: {text}");
         assert!(super::is_fork_text("Đổi tên") && super::is_fork_text("DanCard: Raster") && !super::is_fork_text("Rasterize"));
+        // Tab CTL Offset: người thử là Duẫn.
+        app.ui.dancard.insert("tab".into(), json!("offset"));
+        assert!(painted_text(&mut app, super::show).contains("Duẫn"));
+        // Tab đã lưu không còn: về Dàn file.
+        app.ui.dancard.insert("tab".into(), json!("khong-co"));
+        assert_eq!(super::current_tab(&app), "danfile");
+    }
+
+    /// Mục gập thu lại thì không vẽ phần thân; trạng thái giữ lại theo khóa của mục.
+    #[test]
+    fn muc_gap_giu_trang_thai() {
+        let mut app = VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width": 600, "height": 400})).unwrap();
+        app.ui.dancard.insert("tab".into(), json!("toiuu"));
+        let text = painted_text(&mut app, super::show);
+        assert!(text.contains("Dàn KTS") && text.contains("Dàn bế") && text.contains("Dàn Offset"), "{text}");
+        assert!(text.contains("NGANG GIẤY (CM)"), "Dàn KTS mở sẵn: {text}");
+        assert!(!text.contains("KHE GIỮA 2 KHUÔN"), "Dàn bế thu lại như DanCard: {text}");
+        app.ui.dancard.insert("acc.be".into(), json!(true));
+        assert!(painted_text(&mut app, super::show).contains("KHE GIỮA 2 KHUÔN (MM)"));
     }
 
     /// Clip group: đúng khung mask như bảng Transform, không phải phần giao với nội dung.
