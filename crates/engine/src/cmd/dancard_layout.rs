@@ -4,9 +4,12 @@
 //! rồi dàn: mỗi mẫu được clip đúng khổ (clip group có sẵn thì giữ), Expand Appearance, rồi nhân
 //! bản vào các ô của loại card đã chọn; mặt trước lên artboard 1, mặt sau lên artboard 2 (đối xứng
 //! để lật giấy in mặt sau). Artboard lấy từ file pon chung (nếu có), nội dung cũ trong artboard
-//! được dọn trước (giữ các mẫu đang chọn). Sai khổ thì thử tự sửa: tìm nền đúng khổ rồi raster
-//! theo khung đó, không có thì raster cả object rồi clip đúng khổ ở tâm artboard. Cả lần dàn là
-//! một bước hoàn tác.
+//! được dọn trước (giữ các mẫu đang chọn). Cả lần dàn là một bước hoàn tác.
+//!
+//! Khác DanCard: mẫu được đo và dựng thẳng theo khung transform của nó (card xoay trong app hay
+//! đặt nghiêng trong file .ai đều đo đúng khổ), giữ nguyên vector. Sai khổ thì tự sửa bằng clip
+//! (không raster): có nền đúng khổ thì clip theo khung nền, không thì clip đúng khổ ở tâm phần nhìn
+//! thấy.
 //!
 //! Toạ độ của các ô được viết như DanCard (y hướng lên, gốc góc trên trái cụm) rồi đổi sang trang
 //! của VectorCraft (y hướng xuống).
@@ -15,12 +18,10 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use vectorcraft_color::Paint;
-use vectorcraft_doc::{Appearance, Artboard, Document, Node, NodeId, NodeKind, RasterEffectsSettings, Scaling};
+use vectorcraft_doc::{Appearance, Artboard, Document, Node, NodeId, NodeKind, Scaling};
 use vectorcraft_geom::{Affine, FillRule, Point, Rect, shapes};
-use vectorcraft_render::encode::{RasterExportOptions, RasterFormat};
 
-use super::raster::{Fit, image_node, render_raster};
-use super::{int_param, number_param, roots_in_paint_order, seen_bounds};
+use super::{make_upright, number_param, roots_in_paint_order, seen_bounds, upright_copy};
 use crate::cmd::*;
 use crate::{EngineError, Result, Session};
 
@@ -335,9 +336,25 @@ fn mixed_slots(front: bool, c: Ctx, need_double: usize) -> (Vec<Slot>, Vec<Slot>
 
 // ---------------------------------------------------------------- đo
 
-/// Vùng nhìn thấy thật (visibleUnion của DanCard), không đo được thì khung hình học.
+/// Dấu của khung clip Dàn card tự dựng (Attributes › Note của mask).
+const AUTO_FRAME: &str = "DANCARD_KHUNG_CARD";
+
+/// Vùng nhìn thấy thật (visibleUnion của DanCard), không đo được thì khung hình học. Card Dàn card
+/// đã tự clip về đúng khổ thì đo theo khung clip: ở DanCard card đó đã đúng khổ, hoặc đã thành ảnh
+/// phủ kín khung ([`auto_fix`]), nên khung là vùng của nó kể cả khi nền là path không tô.
 pub(super) fn vis(n: &Node) -> Option<Rect> {
+    if let NodeKind::Group { children, clip: true } = &n.kind
+        && let Some(mask) = children.first().filter(|m| m.extras().attrs.as_deref().is_some_and(|a| a.note == AUTO_FRAME))
+        && let Some(b) = mask.geometric_bounds()
+    {
+        return Some(b);
+    }
     seen_bounds(n).or_else(|| n.visual_bounds()).or_else(|| n.geometric_bounds())
+}
+
+/// Khung nhìn thấy của `id` khi đã dựng thẳng theo khung transform (tài liệu không đổi).
+fn upright_vis(d: &Document, id: NodeId) -> Option<Rect> {
+    upright_copy(d, id).as_ref().and_then(vis)
 }
 
 /// Kích thước nhìn thấy (mm).
@@ -401,6 +418,7 @@ pub(super) fn wrap_clip(d: &mut Document, id: NodeId, c: Point, w: f64, h: f64) 
     let mut mask = Node::new(mask_id, NodeKind::Path { path, rule: FillRule::NonZero, live: None, clipping: true, guide: false });
     mask.appearance = Appearance::basic(Paint::None, Paint::None, 0.0).into();
     mask.name = Some("Khung clip".into());
+    mask.edit_attrs(|a| a.note = AUTO_FRAME.into());
     d.insert(parent, index + 1, mask)?;
     let gid = d.alloc_id();
     Ok(d.wrap(&[id, mask_id], |mut children| {
@@ -430,28 +448,6 @@ fn auto_clip(d: &mut Document, id: NodeId, w: f64, h: f64) -> Result<NodeId> {
     Ok(out)
 }
 
-/// Raster `id` trong vùng `region` (500 ppi, CMYK, nền trong suốt) và thay nó bằng ảnh.
-pub(super) fn raster_in(d: &mut Document, id: NodeId, region: Rect) -> Result<NodeId> {
-    let n = d.node(id).cloned().ok_or(EngineError::NoNode(id))?;
-    let opts = RasterExportOptions { ppi: 500.0, background: None, anti_alias: vectorcraft_render::AntiAlias::Art, ..Default::default() };
-    let inks = d.color_mode == vectorcraft_doc::ColorMode::Cmyk;
-    let mut shown = n.clone();
-    shown.visible = true;
-    let r = render_raster(
-        d,
-        vec![shown],
-        region,
-        Affine::IDENTITY,
-        500.0,
-        Fit::Exact,
-        &opts.render_options(RasterFormat::Png),
-        &RasterEffectsSettings::default(),
-        inks,
-    )?;
-    let img = image_node(d, r, n.name.clone(), 0.0);
-    Ok(d.wrap(&[id], |_| img)?)
-}
-
 /// Object con (nền) có khung hình học khớp `w` × `h` mm nhất trong `n`, trong dung sai `tol` mm.
 fn find_frame(n: &Node, w: f64, h: f64, tol: f64) -> Option<Rect> {
     fn scan(n: &Node, w: f64, h: f64, best: &mut Option<(f64, Rect)>) {
@@ -473,21 +469,30 @@ fn find_frame(n: &Node, w: f64, h: f64, tol: f64) -> Option<Rect> {
     best.filter(|(e, _)| *e <= tol).map(|(_, b)| b)
 }
 
-/// Tự sửa object sai khổ: (A) có nền đúng khổ thì raster theo khung nền; (B) không thì raster cả
-/// object, đưa ảnh về tâm artboard `board` rồi clip đúng khổ.
-fn auto_fix(d: &mut Document, id: NodeId, w: f64, h: f64, board: Rect) -> Option<NodeId> {
+/// Tự sửa object sai khổ (đã dựng thẳng), giữ vector (DanCard `autoFixByBackground` raster ở bước
+/// này), theo chiều ngang/dọc của object; None khi không sửa được (báo sai khổ như DanCard):
+/// - (A) có nền gần đúng khổ (khung hình học lệch tổng hai cạnh tối đa 2 mm): DanCard raster đúng
+///   khung nền, ảnh đó phải khớp khổ (dung sai 0,5 mm), rồi bước clip đúng khổ ở tâm cắt phần thừa.
+///   Ở đây clip một lần: giao của khung nền với khung đúng khổ cùng tâm.
+/// - (B) không thì clip đúng khổ ở tâm khung nhìn thấy của cả object (DanCard raster cả object thành
+///   ảnh rộng bằng khung đó rồi clip ở tâm). Phần nhìn thấy là giao của khung clip với khung đó, nên
+///   object nhỏ hơn khổ thì không sửa được.
+fn auto_fix(d: &mut Document, id: NodeId, w: f64, h: f64) -> Option<NodeId> {
     let n = d.node(id)?.clone();
-    if let Some(frame) = find_frame(&n, w, h, 2.0)
-        && let Ok(img) = raster_in(d, id, frame)
-    {
-        return Some(img);
+    let oriented = |b: &Rect| if (b.width() >= b.height()) == (w >= h) { (w * MM, h * MM) } else { (h * MM, w * MM) };
+    if let Some(frame) = find_frame(&n, w, h, 2.0) {
+        if !matches_size((frame.width() / MM, frame.height() / MM), (w, h), TOL) {
+            return None;
+        }
+        let (cw, ch) = oriented(&frame);
+        return wrap_clip(d, id, frame.center(), frame.width().min(cw), frame.height().min(ch)).ok();
     }
-    let all = vis(&n)?;
-    let img = raster_in(d, id, all).ok()?;
-    let c = board.center();
-    let at = d.node(img).and_then(|n| n.geometric_bounds())?.center();
-    translate_node(d, img, c - at);
-    wrap_clip(d, img, c, w * MM, h * MM).ok()
+    let all = n.visual_bounds().or_else(|| vis(&n)).filter(|b| b.width() > 0.0 && b.height() > 0.0)?;
+    let (cw, ch) = oriented(&all);
+    if !matches_size((all.width().min(cw) / MM, all.height().min(ch) / MM), (w, h), TOL) {
+        return None;
+    }
+    wrap_clip(d, id, all.center(), cw, ch).ok()
 }
 
 /// Các object cấp đầu (con trực tiếp của layer không khóa, đang hiện; không khóa, không ẩn) có tâm
@@ -660,7 +665,7 @@ fn layout_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let d = &st.doc;
     // 1 cột: in 1 mặt; 2 cột trở lên: in 2 mặt.
-    let centers: Vec<(NodeId, Point)> = roots.iter().filter_map(|id| Some((*id, vis(d.node(*id)?)?.center()))).collect();
+    let centers: Vec<(NodeId, Point)> = roots.iter().filter_map(|id| Some((*id, upright_vis(d, *id)?.center()))).collect();
     let mut xs: Vec<f64> = centers.iter().map(|(_, c)| c.x).collect();
     let two_sides = columns(&mut xs, 0.5 * layout.w * MM) >= 2;
     let n_models = if two_sides {
@@ -687,7 +692,8 @@ fn layout_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         sorted.into_iter().map(|(id, _)| vec![id]).collect()
     };
-    let doubles: Vec<bool> = rows.iter().map(|r| layout.key == "9.2x5.6" && r.first().and_then(|id| d.node(*id)).is_some_and(is_double)).collect();
+    let doubles: Vec<bool> =
+        rows.iter().map(|r| layout.key == "9.2x5.6" && r.first().and_then(|id| upright_copy(d, *id)).is_some_and(|n| is_double(&n))).collect();
     let n_double = doubles.iter().filter(|x| **x).count();
     let mut per_model = layout.total / n_models.max(1);
     if n_double > 0 {
@@ -713,16 +719,17 @@ fn layout_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         )));
     }
     let layer = active_layer(s);
-    let board_index = int_param(p, "artboard").and_then(|i| usize::try_from(i).ok()).unwrap_or(0);
-    let board_now = st.doc.artboards.get(board_index).or(st.doc.artboards.first()).map(|a| a.rect).unwrap_or_default();
     let ctx = Ctx { w: opts.w * MM, h: opts.h * MM, g: opts.gap * MM, rot: opts.rot };
     let (cur_w, cur_h) = (opts.w, opts.h);
     let label = format!("Dàn card {} (DanCard)", layout.key);
     let pon = opts.pon.as_ref();
     let result = s.edit(&label, |d, sel| {
         let layer = layer.or_else(|| d.default_layer());
-        // Kiểm tra khổ (dung sai 0,5 mm); sai thì thử tự sửa.
+        // Dựng thẳng theo khung transform, kiểm tra khổ (dung sai 0,5 mm); sai thì thử tự sửa.
         let mut rows = rows.clone();
+        for id in rows.iter().flatten() {
+            make_upright(d, *id);
+        }
         let mut bad_sizes = vec![];
         for (ri, row) in rows.iter_mut().enumerate() {
             let target = if doubles.get(ri).copied().unwrap_or(false) { (DBL_LONG, DBL_SHORT) } else { (cur_w, cur_h) };
@@ -732,7 +739,7 @@ fn layout_cmd(s: &mut Session, p: &Value) -> Result<Value> {
                     continue;
                 }
                 let before = vis_mm(n);
-                match auto_fix(d, *id, target.0, target.1, board_now) {
+                match auto_fix(d, *id, target.0, target.1) {
                     Some(fixed) if d.node(fixed).is_some_and(|n| matches_size(vis_mm(n), target, TOL)) => *id = fixed,
                     _ => bad_sizes.push(before),
                 }
@@ -740,7 +747,7 @@ fn layout_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         }
         if let Some((w, h)) = bad_sizes.first() {
             return Err(EngineError::Other(format!(
-                "Sai kích thước. {} object không khớp khổ {:.1}x{:.1}cm (vd object đo được {:.1}x{:.1}). Đã thử tự sửa (tìm nền + rasterize) nhưng không được. Cách sửa: chỉnh object về đúng khổ, hoặc bỏ nền thừa/object lạ.",
+                "Sai kích thước. {} object không khớp khổ {:.1}x{:.1}cm (vd object đo được {:.1}x{:.1}). Đã thử tự sửa (tìm nền đúng khổ + clip) nhưng không được. Cách sửa: chỉnh object về đúng khổ, hoặc bỏ nền thừa/object lạ.",
                 bad_sizes.len(),
                 cur_w / 10.0,
                 cur_h / 10.0,
@@ -894,9 +901,9 @@ fn voucher_with_card(s: &mut Session, roots: Vec<NodeId>, opts: Opts) -> Result<
     let mut cards = vec![];
     let mut off = 0;
     for id in &roots {
-        let Some(n) = d.node(*id) else { continue };
-        let size = vis_mm(n);
-        let Some(c) = vis(n).map(|b| b.center()) else { continue };
+        let Some(n) = upright_copy(d, *id) else { continue };
+        let size = vis_mm(&n);
+        let Some(c) = vis(&n).map(|b| b.center()) else { continue };
         let (hi, lo) = (size.0.max(size.1), size.0.min(size.1));
         let dv = (hi - VW).abs() + (lo - VH).abs();
         let dc = (hi - CW).abs() + (lo - CH).abs();
@@ -955,6 +962,9 @@ fn voucher_with_card(s: &mut Session, roots: Vec<NodeId>, opts: Opts) -> Result<
             if !gone.is_empty() {
                 d.remove_many(&gone)?;
             }
+        }
+        for id in &keep {
+            make_upright(d, *id);
         }
         let mut clip_pairs = |rows: &[(NodeId, NodeId)], w: f64, h: f64| -> Result<Vec<(NodeId, NodeId)>> {
             rows.iter().map(|(f, b)| Ok((auto_clip(d, *f, w, h)?, auto_clip(d, *b, w, h)?))).collect()

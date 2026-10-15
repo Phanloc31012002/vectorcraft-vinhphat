@@ -6,7 +6,7 @@
 use egui::{RichText, Ui};
 use serde_json::{Value, json};
 
-use super::{Note, check_box, note_id, run_and_note, show_note, text_box};
+use super::{Note, check_box, count_prefix, note_id, run_and_note, text_box};
 use crate::VectorcraftApp;
 use crate::panels::{pstate, set_pstate};
 use crate::theme::Tokens;
@@ -99,28 +99,9 @@ fn run(app: &mut VectorcraftApp, ui: &Ui, params: Value) {
     let _ = app.run("view.goToArtboard", json!({"index": 0}));
 }
 
-/// `[[COUNT:n]]` ở đầu thông báo (`^\[\[COUNT:(\d+)\]\]\s*` của DanCard) → (n, phần còn lại).
-fn count_prefix(text: &str) -> Option<(&str, &str)> {
-    let rest = text.strip_prefix("[[COUNT:")?;
-    let end = rest.find("]]")?;
-    let n = rest.get(..end)?;
-    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some((n, rest.get(end + 2..)?.trim_start()))
-}
-
 /// Ô kết quả: "n con / tờ" đậm rồi ghi chú; lỗi và thông báo khác như các tab khác.
 fn result(ui: &mut Ui, t: &Tokens) {
-    let Note(text, err) = pstate::<Note>(ui.ctx(), &note_id(AREA));
-    if !err && let Some((n, rest)) = count_prefix(&text) {
-        ui.label(RichText::new(format!("{n} con / tờ")).strong().color(t.text));
-        if !rest.is_empty() {
-            ui.label(RichText::new(rest).color(t.text));
-        }
-        return;
-    }
-    show_note(ui, AREA, t, "Chọn một bài rồi bấm Dàn tối ưu.");
+    super::show_count_note(ui, AREA, t, "Chọn một bài rồi bấm Dàn tối ưu.");
 }
 
 #[cfg(test)]

@@ -6,6 +6,10 @@
 //! sau), mỗi trang đúng khung clip của mặt đó. Tên file:
 //! `<mã> - <STT> - <số hộp> hop[ - ghi chú][ - 1 mat] - <cán màng> - <ngày>.pdf`. Không sửa tài
 //! liệu đang mở, không ghi đè file đã có.
+//!
+//! Khác DanCard: mỗi mặt được dựng thẳng theo khung transform trước khi đo trang (card xoay trong
+//! app hay đặt nghiêng trong file .ai vẫn ra trang đúng khổ), và Clip card đo, dựng mask theo khung
+//! transform (phần nghiêng lẻ) của phạm vi clip.
 
 use std::sync::Arc;
 
@@ -37,7 +41,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             "DanCard: Clip card tự xoay",
             [],
             None,
-            "{width?, height?: cm (mặc định 9,2 × 5,6)} clip mỗi object đang chọn thành card đúng khổ, tự xoay khung theo object (nằm ngang: rộng × cao; đứng dọc: cao × rộng), canh giữa theo khung clip có sẵn (hoặc khung của object); clip group đã đúng khổ thì giữ, một bước hoàn tác → {message, ids, errors}",
+            "{width?, height?: cm (mặc định 9,2 × 5,6)} clip mỗi object đang chọn thành card đúng khổ như dcClipCard926: khung tự xoay theo clip cha gần nhất hoặc chính object (nằm ngang: dài × ngắn; đứng dọc: ngắn × dài, như đang thấy trên trang), neo tâm theo clip cha (chọn object con thì clip cả clip group), không có thì theo nền đúng khổ trong group trông như một trang, không có nữa thì theo khung của object; mask nghiêng theo khung transform; mỗi card một lần, clip cha đã đúng khổ thì giữ; một bước hoàn tác → {message, ids, errors}",
             has_selection,
             clip_card
         ),
@@ -67,8 +71,7 @@ struct Card {
 fn cards_of(d: &Document, ids: &[NodeId]) -> std::result::Result<(Vec<Card>, usize), String> {
     let mut items = vec![];
     for (i, id) in ids.iter().enumerate() {
-        let b = d
-            .node(*id)
+        let b = super::upright_copy(d, *id)
             .and_then(|n| n.geometric_bounds())
             .filter(|b| b.width() > 0.0 && b.height() > 0.0 && b.area().is_finite())
             .ok_or_else(|| format!("Object {} không có khung hợp lệ. Hãy bỏ object lỗi/đang ẩn rồi thử lại.", i + 1))?;
@@ -190,12 +193,12 @@ impl Naming {
 /// Tài liệu tạm của một con card: mặt trước (và mặt sau đặt bên phải, cùng mép trên), mỗi mặt một
 /// artboard đúng khung của nó.
 fn card_document(d: &Document, card: &Card) -> Result<Document> {
-    let front = d.node(card.front).cloned().ok_or(EngineError::NoNode(card.front))?;
+    let front = super::upright_copy(d, card.front).ok_or(EngineError::NoNode(card.front))?;
     let fb = frame_of(&front).ok_or_else(|| EngineError::Other("Không đo được mặt trước.".into()))?;
     let mut nodes = vec![front];
     let mut frames = vec![fb];
     if let Some(back) = card.back {
-        let mut back = d.node(back).cloned().ok_or(EngineError::NoNode(back))?;
+        let mut back = super::upright_copy(d, back).ok_or(EngineError::NoNode(back))?;
         let bb = frame_of(&back).ok_or_else(|| EngineError::Other("Không đo được mặt sau.".into()))?;
         let by = Vec2::new(fb.x1 + GAP - bb.x0, fb.y0 - bb.y0);
         back.transform(Affine::translate(by), Scaling { strokes: true, patterns: true, ..Scaling::default() });
@@ -318,6 +321,162 @@ fn auto_save_pdf(s: &mut Session, p: &Value) -> Result<Value> {
 
 // ---------------------------------------------------------------- Clip 9,2 × 5,6 tự xoay
 
+/// Số tầng tối đa khi dò clip cha / group có nền (như DanCard).
+const SCOPE_DEPTH: usize = 12;
+
+/// Neo của mask Clip card.
+#[derive(Clone, Copy, PartialEq)]
+enum Anchor {
+    /// Clipping path của clip group gần nhất chứa object (khung trang đã duyệt).
+    Clip,
+    /// Nền đúng khổ trong group gần nhất trông như một trang.
+    Background,
+    /// Khung hình học của chính object.
+    Fallback,
+}
+
+/// Phạm vi Clip card của một object (`_dcClipToSizeCore` của DanCard): object được bọc, hệ trục đo
+/// (trang → hệ trục phần nghiêng lẻ của khung transform của nó, góc đó), khung neo trong hệ trục đó.
+#[derive(Clone, Copy)]
+struct Scope {
+    id: NodeId,
+    to_local: Affine,
+    tilt: f64,
+    anchor: Rect,
+    kind: Anchor,
+}
+
+/// Hệ trục đo của `id`: phần nghiêng lẻ (-45°, 45°] của khung transform, như các lệnh dàn (ngang ×
+/// dọc như đang thấy trên trang).
+fn axes_of(d: &Document, id: NodeId) -> (Affine, f64) {
+    match super::frame_of(d, &[id], false).map(|f| super::tilt_of(f.angle)) {
+        Some(t) if t.is_finite() && t != 0.0 => (Affine::rotate(t.to_radians()), t),
+        _ => (Affine::IDENTITY, 0.0),
+    }
+}
+
+/// `n` đưa sang hệ trục `to_local`.
+fn in_axes(n: &Node, to_local: Affine) -> Node {
+    let mut p = n.clone();
+    if to_local != Affine::IDENTITY {
+        p.transform(to_local, Scaling::default());
+    }
+    p
+}
+
+/// `id` rồi các group chứa nó, tối đa [`SCOPE_DEPTH`] tầng, dừng ở layer.
+fn upward(d: &Document, id: NodeId) -> Vec<NodeId> {
+    let chain = d.ancestry(id).unwrap_or_default();
+    chain.iter().rev().take(SCOPE_DEPTH).map_while(|a| d.node(*a).filter(|n| !n.is_layer()).map(|n| n.id)).collect()
+}
+
+/// `findScopeByExistingClip`: clip group gần nhất (chính `id` hoặc group chứa nó) có clipping path.
+fn clip_scope(d: &Document, id: NodeId) -> Option<Scope> {
+    upward(d, id).into_iter().find_map(|a| {
+        let n = d.node(a)?;
+        let NodeKind::Group { children, clip: true } = &n.kind else { return None };
+        let (to_local, tilt) = axes_of(d, a);
+        let anchor = in_axes(children.first()?, to_local).geometric_bounds().filter(|b| b.width() > 0.0 && b.height() > 0.0)?;
+        Some(Scope { id: a, to_local, tilt, anchor, kind: Anchor::Clip })
+    })
+}
+
+/// `frameMatchesSize`: khung `b` đúng `w` × `h` (dung sai max(1,5 pt; 0,6 % cạnh ngắn)).
+fn card_sized(b: Rect, w: f64, h: f64) -> bool {
+    let tol = (w.min(h) * 0.006).max(1.5);
+    (b.width() - w).abs() <= tol && (b.height() - h).abs() <= tol
+}
+
+/// `scanBackgroundFrames`: path, compound path, ảnh trong `n` (đi qua các group) có khung đúng khổ.
+fn backgrounds(n: &Node, w: f64, h: f64, out: &mut Vec<Rect>) {
+    match &n.kind {
+        NodeKind::Path { guide: false, .. } | NodeKind::Compound { .. } | NodeKind::Image(_) | NodeKind::PlacedDocument(_) => {
+            if let Some(b) = n.geometric_bounds().filter(|b| card_sized(*b, w, h)) {
+                out.push(b);
+            }
+        }
+        NodeKind::Group { children, .. } => {
+            for c in children {
+                backgrounds(c, w, h, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `scopeLooksLikeOnePage`: tâm phạm vi lệch tâm nền tối đa 30 % mỗi chiều, phạm vi tối đa 1,8 lần nền.
+fn one_page(scope: Option<Rect>, f: Rect) -> bool {
+    let Some(s) = scope else { return false };
+    let (sc, fc) = (s.center(), f.center());
+    (sc.x - fc.x).abs() <= f.width() * 0.3
+        && (sc.y - fc.y).abs() <= f.height() * 0.3
+        && s.width() <= f.width() * 1.8
+        && s.height() <= f.height() * 1.8
+}
+
+/// `findScopeByBackground`: group gần nhất (chính `id` hoặc group chứa nó) có đúng một nền `w` × `h`
+/// (nhiều nền thì nền gần tâm group nhất) và trông như một trang.
+fn background_scope(d: &Document, id: NodeId, w: f64, h: f64) -> Option<Scope> {
+    upward(d, id).into_iter().find_map(|a| {
+        let n = d.node(a).filter(|n| matches!(n.kind, NodeKind::Group { .. }))?;
+        let (to_local, tilt) = axes_of(d, a);
+        let probe = in_axes(n, to_local);
+        let mut found = Vec::new();
+        backgrounds(&probe, w, h, &mut found);
+        let scope_box = probe.visual_bounds();
+        let anchor = match found.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => {
+                let c = scope_box.map(|b| b.center());
+                let dist = |r: &Rect| c.map_or(0.0, |c| (c.x - r.center().x).abs() + (c.y - r.center().y).abs());
+                many.iter().copied().min_by(|a, b| dist(a).total_cmp(&dist(b)))
+            }
+        }
+        .filter(|f| one_page(scope_box, *f))?;
+        Some(Scope { id: a, to_local, tilt, anchor, kind: Anchor::Background })
+    })
+}
+
+/// Khung hình học của chính `id` trong hệ trục của nó (`geometricBounds || visibleBounds`).
+fn own_scope(d: &Document, id: NodeId) -> Option<Scope> {
+    let n = d.node(id)?;
+    let (to_local, tilt) = axes_of(d, id);
+    let probe = in_axes(n, to_local);
+    let positive = |b: &Rect| b.width() > 0.0 && b.height() > 0.0 && b.area().is_finite();
+    let anchor = probe.geometric_bounds().filter(positive).or_else(|| probe.visual_bounds().filter(positive))?;
+    Some(Scope { id, to_local, tilt, anchor, kind: Anchor::Fallback })
+}
+
+/// Bọc `scope` trong clip group mới: mask `w` × `h` (không tô, không viền) đặt tâm tại tâm khung neo,
+/// dựng trong hệ trục của phạm vi rồi đưa ra trang (`clipOne` của DanCard).
+fn wrap_scope(d: &mut Document, scope: &Scope, w: f64, h: f64) -> Result<NodeId> {
+    let c = scope.anchor.center();
+    let local = Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0);
+    let path =
+        if scope.to_local == Affine::IDENTITY { shapes::rectangle(local) } else { shapes::rectangle(local).transformed(scope.to_local.inverse()) };
+    let (parent, index, _) = d.position(scope.id).ok_or(EngineError::NoNode(scope.id))?;
+    let mask_id = d.alloc_id();
+    let mut mask = Node::new(mask_id, NodeKind::Path { path, rule: FillRule::NonZero, live: None, clipping: true, guide: false });
+    mask.bbox_angle = scope.tilt;
+    mask.appearance = vectorcraft_doc::Appearance::basic(vectorcraft_color::Paint::None, vectorcraft_color::Paint::None, 0.0).into();
+    mask.name = Some("Khung clip".into());
+    d.insert(parent, index + 1, mask)?;
+    let gid = d.alloc_id();
+    let tilt = scope.tilt;
+    Ok(d.wrap(&[scope.id, mask_id], |mut children: Vec<Arc<Node>>| {
+        children.rotate_right(1);
+        let mut g = Node::new(gid, NodeKind::Group { children, clip: true });
+        g.bbox_angle = tilt;
+        g
+    })?)
+}
+
+/// `dcClipCard926`: mỗi object đang chọn thành card đúng khổ, khung tự xoay theo object (nằm ngang:
+/// dài × ngắn; đứng dọc: ngắn × dài, đo trên clip cha gần nhất hoặc chính object), rồi clip như
+/// `_dcClipToSizeCore`: tìm phạm vi (clip cha, group có nền đúng khổ, hoặc chính object), mỗi phạm vi
+/// một lần, mask đặt tâm tại khung neo. Đo theo khung transform: phần nghiêng lẻ của khung là trục của
+/// mask, nên card đặt nghiêng vẫn clip đúng cạnh.
 fn clip_card(s: &mut Session, p: &Value) -> Result<Value> {
     let cm = 72.0 / 2.54;
     let w = number_param(p, "width").filter(|v| *v > 0.0).unwrap_or(9.2) * cm;
@@ -329,35 +488,38 @@ fn clip_card(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let total = ids.len();
     let (done, errors) = s.edit("Clip card tự xoay (DanCard)", |d, sel| {
-        let mut done = vec![];
+        let mut done: Vec<NodeId> = vec![];
+        let mut handled: Vec<NodeId> = vec![];
         let mut errors = vec![];
         for (i, id) in ids.iter().enumerate() {
-            let Some(n) = d.node(*id) else { continue };
-            let Some(frame) = frame_of(n).filter(|b| b.width() > 0.0 && b.height() > 0.0) else {
+            if d.node(*id).is_none() {
+                continue;
+            }
+            // Hướng ngang/dọc theo clip cha gần nhất, không có thì theo khung của chính object.
+            let clip = clip_scope(d, *id);
+            let Some(reference) = clip.map(|c| c.anchor).or_else(|| own_scope(d, *id).map(|c| c.anchor)) else {
                 errors.push(format!("Object {}: không đo được object.", i + 1));
                 continue;
             };
-            let portrait = frame.height() > frame.width();
-            let (cw, ch) = if portrait { (short, long) } else { (long, short) };
-            // Clip group đã đúng khổ: giữ nguyên.
-            if n.clips() && (frame.width() - cw).abs() < 0.01 && (frame.height() - ch).abs() < 0.01 {
-                done.push(*id);
+            let (cw, ch) = if reference.height() > reference.width() { (short, long) } else { (long, short) };
+            let Some(scope) = clip.or_else(|| background_scope(d, *id, cw, ch)).or_else(|| own_scope(d, *id)) else {
+                errors.push(format!("Object {}: không đo được object.", i + 1));
+                continue;
+            };
+            // Nhiều object con của cùng một trang: chỉ clip trang đó một lần.
+            if handled.contains(&scope.id) {
                 continue;
             }
-            let c = frame.center();
-            let Some((parent, index, _)) = d.position(*id) else { continue };
-            let mask_id = d.alloc_id();
-            let path = shapes::rectangle(Rect::new(c.x - cw / 2.0, c.y - ch / 2.0, c.x + cw / 2.0, c.y + ch / 2.0));
-            let mut mask = Node::new(mask_id, NodeKind::Path { path, rule: FillRule::NonZero, live: None, clipping: true, guide: false });
-            mask.appearance = vectorcraft_doc::Appearance::basic(vectorcraft_color::Paint::None, vectorcraft_color::Paint::None, 0.0).into();
-            mask.name = Some("Khung clip".into());
-            d.insert(parent, index + 1, mask)?;
-            let gid = d.alloc_id();
-            d.wrap(&[*id, mask_id], |mut children: Vec<Arc<Node>>| {
-                children.rotate_right(1);
-                Node::new(gid, NodeKind::Group { children, clip: true })
-            })?;
-            done.push(gid);
+            handled.push(scope.id);
+            // Clip cha đã đúng khổ: giữ nguyên.
+            if scope.kind == Anchor::Clip && (scope.anchor.width() - cw).abs() < 0.01 && (scope.anchor.height() - ch).abs() < 0.01 {
+                done.push(scope.id);
+                continue;
+            }
+            match wrap_scope(d, &scope, cw, ch) {
+                Ok(g) => done.push(g),
+                Err(e) => errors.push(format!("Object {}: {e}", i + 1)),
+            }
         }
         if done.is_empty() {
             return Err(EngineError::Other(format!("Không clip được object nào.\n{}", errors.join("\n"))));
@@ -365,7 +527,11 @@ fn clip_card(s: &mut Session, p: &Value) -> Result<Value> {
         sel.set(done.iter().copied());
         Ok((done, errors))
     })?;
-    let mut message = format!("OK: Đã clip {}/{total} object thành 9.2 x 5.6 (tự xoay).", done.len());
+    let fmt = |v: f64| {
+        let t = format!("{:.2}", v / cm);
+        t.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let mut message = format!("OK: Đã clip {}/{total} object thành {} x {} (tự xoay, dùng chung logic Clip).", done.len(), fmt(long), fmt(short));
     if !errors.is_empty() {
         message.push_str(&format!("\n{}", errors.join("\n")));
     }

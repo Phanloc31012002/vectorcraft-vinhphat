@@ -9,7 +9,8 @@
 //!   luôn theo khổ nhập; chỉ bài ruột bị bóp 1 mm mỗi tờ từ ngoài vào trong.
 //! - Keo gáy: tuần tự, không bóp, không khe; A4 16 trang / tờ AB, A5 hai tay 16 (32 trang); phần dư
 //!   tự trở TT16 / TT8 / TT4 (tờ nhỏ thu trang về cạnh 20,9 cm). Bìa dàn tay.
-//! - Cả hai: trang vector được làm phẳng thành ảnh 500 ppi (trang chỉ có ảnh thì giữ), co đúng khổ,
+//! - Cả hai: trang được dựng thẳng theo khung transform và giữ nguyên vector (DanCard làm phẳng
+//!   thành ảnh 500 ppi vì không đọc được góc), co đúng khổ,
 //!   đưa về layer đang vẽ; PON giấy và PON cắt nằm trên hai layer riêng trên cùng, khóa lại; các
 //!   artboard cũ được thay bằng các tờ mới; ghi chú "RUỘT N" ở mặt A (chữ thêm theo tham số thay cho
 //!   hộp thoại ghi chú, không có icon). Cả lần dàn là một bước hoàn tác. Kết quả kèm `sizes`: các
@@ -24,8 +25,7 @@ use vectorcraft_color::{Color, Paint};
 use vectorcraft_doc::{Appearance, Artboard, CharStyle, Document, Node, NodeId, NodeKind, Scaling, TextObject};
 use vectorcraft_geom::{Affine, Point, Rect, Vec2, shapes};
 
-use super::catalogue::image_only;
-use super::layout::{active_layer, raster_in, union_of, vis};
+use super::layout::{active_layer, union_of, vis};
 use super::{number_param, roots_in_paint_order};
 use crate::cmd::*;
 use crate::{EngineError, Result, Session};
@@ -70,7 +70,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             "DanCard: Dàn Đóng ghim giữa (CTL Offset)",
             [],
             None,
-            "{width, height: cm (khổ một trang, rộng × cao), cover?: bool (mặc định true: có bìa, 4 trang ngoài cùng 1, 2, N-1, N thành tờ tự trở 4 trang không bóp), notes?: bool (mặc định true: thêm ghi chú RUỘT n ở mặt A mỗi tờ ruột; false: bỏ qua ghi chú), coverNote?: ghi chú BÌA (không tự thêm chữ), insideNote?: chữ thêm sau RUỘT n (chữ đỏ), typeNotes?: {tt4, tt8, ab, small4, small8, small16, smallAB} (chữ thêm riêng theo loại tờ, thắng insideNote)} dàn các trang đang chọn (thứ tự đọc: hàng trên trước, trái → phải; số trang chia hết cho 4) thành CTL Offset bấm ghim giữa: tự trở 4/8 (A5 thêm 16) trước, rồi các tờ AB; tờ giấy cố định, trang vector làm phẳng 500 ppi, bóp ruột 1 mm mỗi tờ (PON giữ lưới gốc), PON giấy và PON cắt tự vẽ trên hai layer khóa trên cùng, artboard cũ thay bằng các tờ mới; một bước hoàn tác → {message, summary, faces, cutPon, notes, artboards: [tên], sizes: {total, groups: [{key, label, jobs: [{name, ab: [số artboard từ 1], w, h: pt}]}]}}",
+            "{width, height: cm (khổ một trang, rộng × cao), cover?: bool (mặc định true: có bìa, 4 trang ngoài cùng 1, 2, N-1, N thành tờ tự trở 4 trang không bóp), notes?: bool (mặc định true: thêm ghi chú RUỘT n ở mặt A mỗi tờ ruột; false: bỏ qua ghi chú), coverNote?: ghi chú BÌA (không tự thêm chữ), insideNote?: chữ thêm sau RUỘT n (chữ đỏ), typeNotes?: {tt4, tt8, ab, small4, small8, small16, smallAB} (chữ thêm riêng theo loại tờ, thắng insideNote)} dàn các trang đang chọn (thứ tự đọc: hàng trên trước, trái → phải; số trang chia hết cho 4) thành CTL Offset bấm ghim giữa: tự trở 4/8 (A5 thêm 16) trước, rồi các tờ AB; tờ giấy cố định, trang dựng thẳng theo khung transform (giữ vector), bóp ruột 1 mm mỗi tờ (PON giữ lưới gốc), PON giấy và PON cắt tự vẽ trên hai layer khóa trên cùng, artboard cũ thay bằng các tờ mới; một bước hoàn tác → {message, summary, faces, cutPon, notes, artboards: [tên], sizes: {total, groups: [{key, label, jobs: [{name, ab: [số artboard từ 1], w, h: pt}]}]}}",
             has_selection,
             saddle_stitch
         ),
@@ -1003,8 +1003,8 @@ fn reading_order(d: &Document, ids: &[NodeId]) -> Result<(Vec<NodeId>, Point)> {
     let mut items: Vec<(NodeId, Rect)> = vec![];
     // Như vùng chọn của Illustrator: object trên cùng trước.
     for id in ids.iter().rev() {
-        let n = d.node(*id).ok_or(EngineError::NoNode(*id))?;
-        let b = vis(n).filter(finite).ok_or_else(|| other("Có trang không đo được kích thước."))?;
+        let n = super::upright_copy(d, *id).ok_or(EngineError::NoNode(*id))?;
+        let b = vis(&n).filter(finite).ok_or_else(|| other("Có trang không đo được kích thước."))?;
         items.push((*id, b));
     }
     let start =
@@ -1071,22 +1071,24 @@ fn add_pon_layer(d: &mut Document, name: &str, lines: &[Line]) -> Result<NodeId>
     Ok(d.insert(None, usize::MAX, layer)?)
 }
 
-/// Làm phẳng một trang (`dcFlattenForImposition`, khung `frame`), đưa lên trên cùng layer `art`.
-fn flatten_into(d: &mut Document, id: NodeId, frame: Rect, art: NodeId) -> Result<NodeId> {
+/// Một trang dựng thẳng theo khung transform, giữ vector (thay cho `dcFlattenForImposition` của
+/// DanCard), đưa lên trên cùng layer `art`.
+fn page_into(d: &mut Document, id: NodeId, art: NodeId) -> Result<NodeId> {
     let n = d.node(id).ok_or(EngineError::NoNode(id))?;
     if n.is_layer() {
         return Err(other("Chọn các trang (object), không chọn cả layer."));
     }
-    let flat = if image_only(n) {
-        id
-    } else {
-        if !(finite(&frame) && frame.width() > 0.0 && frame.height() > 0.0) {
-            return Err(other("Không xác định được khung để raster."));
-        }
-        raster_in(d, id, frame)?
-    };
-    d.move_node(flat, Some(art), usize::MAX)?;
-    Ok(flat)
+    super::make_upright(d, id);
+    if !box_of(d, id).is_some_and(|b| b.width() > 0.0 && b.height() > 0.0) {
+        return Err(other("Không xác định được khung của trang."));
+    }
+    d.move_node(id, Some(art), usize::MAX)?;
+    Ok(id)
+}
+
+/// Khung thật của trang `id` khi đã dựng thẳng theo khung transform (tài liệu không đổi).
+fn upright_box(d: &Document, id: NodeId) -> Option<Rect> {
+    super::upright_copy(d, id).as_ref().and_then(page_box)
 }
 
 /// Artboard của các mặt, thay các artboard cũ (`dcRemoveOldCanvasArtboards`).
@@ -1629,11 +1631,10 @@ fn saddle_stitch(s: &mut Session, p: &Value) -> Result<Value> {
     let (cut_count, clamps, note_count, art) = s.edit("Dàn CTL Offset (DanCard)", |d, sel| {
         let art = artwork_layer(d, layer_hint, &[SIG_PAPER_LAYER, SIG_CUT_LAYER])?;
         remove_layers(d, &[SIG_PAPER_LAYER, SIG_CUT_LAYER])?;
-        // Trang: làm phẳng tại khung thật, co đúng khổ nhập (không đều), A5 nằm ngang thì dựng đứng.
+        // Trang: dựng thẳng theo khung transform, co đúng khổ nhập (không đều), A5 nằm ngang thì dựng đứng.
         let mut pages = Vec::with_capacity(order.len());
         for id in &order {
-            let frame = box_of(d, *id).unwrap_or(Rect::ZERO);
-            let flat = flatten_into(d, *id, frame, art)?;
+            let flat = page_into(d, *id, art)?;
             if let Some(b) = box_of(d, flat).filter(|b| b.width() > 0.0 && b.height() > 0.0) {
                 apply(d, flat, scale_about(src_w / b.width(), src_h / b.height(), b.center()));
             }
@@ -1752,12 +1753,10 @@ fn perfect_bind(s: &mut Session, p: &Value) -> Result<Value> {
     let faces = keo_plan(n_pages, small).map_err(other)?;
     let st = s.doc()?;
     let (order, start) = reading_order(&st.doc, &roots)?;
-    // Đo trước mọi trang, khi chưa sửa gì.
-    let mut sources = Vec::with_capacity(order.len());
+    // Đo trước mọi trang (đã dựng thẳng theo khung transform), khi chưa sửa gì.
     for (i, id) in order.iter().enumerate() {
-        let b = box_of(&st.doc, *id).unwrap_or(Rect::ZERO);
+        let b = upright_box(&st.doc, *id).unwrap_or(Rect::ZERO);
         keo_page_scales(b.width(), b.height(), typed_w * MM, typed_h * MM).map_err(|e| other(format!("Trang ruột {}: {e}", i + 1)))?;
-        sources.push(b);
     }
     // Khổ giấy, khung trang của từng mặt, kiểm tra vừa tờ.
     let (pw0, ph0) = (page_w * MM, page_h * MM);
@@ -1804,10 +1803,10 @@ fn perfect_bind(s: &mut Session, p: &Value) -> Result<Value> {
     let names: Vec<String> = faces.iter().map(|f| f.label.clone()).collect();
     let (cut_count, note_count, art) = s.edit("Dàn CTL Keo gáy (DanCard)", |d, sel| {
         let art = artwork_layer(d, layer_hint, &[KEO_PAPER_LAYER, KEO_CUT_LAYER])?;
-        // Trang: làm phẳng, co đúng khung của mặt theo trục tài liệu, kiểm tra lại, A5 nằm ngang dựng đứng.
+        // Trang: dựng thẳng, co đúng khung của mặt theo trục tài liệu, kiểm tra lại, A5 nằm ngang dựng đứng.
         let mut pages = Vec::with_capacity(order.len());
-        for (i, (id, frame)) in order.iter().zip(&sources).enumerate() {
-            let flat = flatten_into(d, *id, *frame, art)?;
+        for (i, id) in order.iter().enumerate() {
+            let flat = page_into(d, *id, art)?;
             let b = box_of(d, flat)
                 .filter(|b| b.width() > 0.0 && b.height() > 0.0)
                 .ok_or_else(|| other(format!("Không đo được kích thước trang ruột {}", i + 1)))?;

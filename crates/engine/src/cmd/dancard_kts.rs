@@ -11,7 +11,8 @@
 //! - 2 mặt: chọn theo hàng, trái = trước, phải = sau; mặt sau đặt đối xứng ngang (lật ngang tờ),
 //!   con mặt trước xoay +90° thì mặt sau xoay −90°.
 //!
-//! Khác DanCard: tờ mới đặt vào chỗ trống bên phải mọi thứ đang có (thay cho gốc canvas ±7200 pt
+//! Khác DanCard: bài nguồn được đo và nhân bản theo khung transform (bài xoay trong app hay đặt
+//! nghiêng trong file .ai được dựng thẳng trước, đo đúng rộng × cao của bài); tờ mới đặt vào chỗ trống bên phải mọi thứ đang có (thay cho gốc canvas ±7200 pt
 //! của Illustrator), vẫn xếp trái → phải rồi xuống hàng trong bề ngang 14400 pt như canvas đó; hộp
 //! thoại "Dàn nhiều loại" thành tham số `continueUneven`; cả lần dàn là một bước hoàn tác (lỗi giữa
 //! chừng không để lại gì). Số con được chặn (`MAX_PER_SHEET`, `MAX_PER_AXIS`, `MAX_COPIES`).
@@ -307,7 +308,7 @@ fn kts_layout(s: &mut Session, p: &Value) -> Result<Value> {
     let mut raw: Vec<Rec> = Vec::new();
     let mut source_ids: Vec<NodeId> = Vec::new();
     for id in roots {
-        let Some(b) = doc.node(id).and_then(vis) else { continue };
+        let Some(b) = super::upright_copy(&doc, id).as_ref().and_then(vis) else { continue };
         if ![b.x0, b.y0, b.x1, b.y1].iter().all(|v| v.is_finite()) || b.width() <= EPS || b.height() <= EPS {
             continue;
         }
@@ -448,7 +449,8 @@ fn kts_layout(s: &mut Session, p: &Value) -> Result<Value> {
     let front_base = if two_sided { FRONT_SIDE } else { ONE_SIDE };
 
     let built = s.edit("Dàn tối ưu (DanCard)", |d, sel| {
-        let sources: Vec<Option<Node>> = source_ids.iter().map(|id| d.node(*id).cloned()).collect();
+        // Bản dựng thẳng theo khung transform của từng bài: nhân bản từ đây.
+        let sources: Vec<Option<Node>> = source_ids.iter().map(|id| super::upright_copy(d, *id)).collect();
         let front_layer = add_layer(d, front_base)?;
         let back_layer = if two_sided { Some(add_layer(d, BACK_SIDE)?) } else { None };
         let mut ids = Vec::new();

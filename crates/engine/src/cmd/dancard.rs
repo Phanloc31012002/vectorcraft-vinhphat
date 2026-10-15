@@ -122,7 +122,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "DanCard: Clip theo kích thước",
             [],
             None,
-            "{width, height, unit?: cm|mm|in|pt (mặc định cm), followAngle?: bool (mask xoay theo khung transform của object đặt nghiêng, như dancard.transform đọc; mặc định false)} mỗi object đang chọn được bọc trong clipping mask chữ nhật width × height đặt đúng tâm vùng nhìn thấy thật của nó; object đã là clip group thì giữ nguyên → {message, ids, errors}",
+            "{width, height, unit?: cm|mm|in|pt (mặc định cm), followAngle?: bool (mask nghiêng theo khung transform của object, như dancard.transform đọc: card xoay hay đặt nghiêng vẫn clip đúng trục, width × height là ngang × dọc như đang thấy trên trang; mặc định true, false: khung thẳng của trang)} như nút Clip của DanCard: mỗi object đang chọn được bọc trong clipping mask chữ nhật width × height đặt đúng tâm phần nhìn thấy thật của nó (bỏ object ẩn, guide, path không tô), object đã là clip group thì giữ nguyên khung, rồi Expand Appearance; một bước hoàn tác → {message, ids, errors}",
             has_selection,
             clip_to_size
         ),
@@ -131,7 +131,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "DanCard: Resize theo kích thước",
             [],
             None,
-            "{width, height, unit?: cm|mm|in|pt (mặc định cm), strokes?: bool (co giãn nét, mặc định theo Scale Strokes & Effects)} mỗi object đang chọn được co giãn thành đúng width × height đo theo khung transform của nó (như bảng Transform: clip group theo mask, card đặt nghiêng theo trục của card), giữ nguyên tâm, một bước hoàn tác → {message, ids, errors}",
+            "{width, height, unit?: cm|mm|in|pt (mặc định cm), strokes?: bool (co giãn nét, mặc định theo Scale Strokes & Effects)} mỗi object đang chọn được co giãn thành đúng width × height đo theo khung transform của nó (như bảng Transform: clip group theo mask, card đặt nghiêng theo trục của card; width × height là ngang × dọc như đang thấy trên trang, object đã xoay 90° vẫn nhập theo hướng đang thấy), giữ nguyên tâm, một bước hoàn tác → {message, ids, errors}",
             has_selection,
             resize
         ),
@@ -497,6 +497,106 @@ fn frame_of(d: &Document, ids: &[NodeId], visual: bool) -> Option<Frame> {
     Some(detect_frame(pts).filter(|f| f.source == "detected").unwrap_or(boxed))
 }
 
+// ---------------------------------------------------------------- dựng thẳng theo khung transform
+
+/// Xoay quanh tâm: nét và hoa văn đi theo bài.
+fn upright_scaling() -> vectorcraft_doc::Scaling {
+    vectorcraft_doc::Scaling { strokes: true, patterns: true, ..vectorcraft_doc::Scaling::default() }
+}
+
+/// Phần nghiêng lẻ của góc `angle` (độ), đưa về (-45°, 45°]. Dựng thẳng chỉ bỏ phần này: các lần
+/// xoay 90° / 180° được giữ nguyên như người dùng đang thấy trên trang (DanCard đo theo khung của
+/// trang), và góc VectorCraft lưu khi xoay trong app hay góc dò từ file .ai / PDF cho cùng kết quả.
+pub(super) fn tilt_of(angle: f64) -> f64 {
+    let mut a = angle - 90.0 * (angle / 90.0).round();
+    if a <= -45.0 {
+        a += 90.0;
+    }
+    if a > 45.0 {
+        a -= 90.0;
+    }
+    a
+}
+
+/// Phép xoay quanh tâm khung đưa `id` về thẳng theo khung transform của nó (góc VectorCraft lưu khi
+/// xoay trong app, hoặc góc dò được của hình chữ nhật đặt nghiêng trong file .ai/PDF), chỉ bỏ phần
+/// nghiêng lẻ ([`tilt_of`]): (phép xoay, góc nghiêng đã bỏ, góc này dò từ hình dạng). None khi
+/// khung đã thẳng, kể cả khi xoay đúng 90° / 180°.
+///
+/// DanCard trên Illustrator không đọc được góc nên đo bằng khung thẳng của trang và raster để sửa
+/// khổ; ở đây các lệnh dàn dựng thẳng bài theo khung transform rồi mới đo, giữ nguyên vector.
+pub(super) fn upright_affine(d: &Document, id: NodeId) -> Option<(Affine, f64, bool)> {
+    let f = frame_of(d, &[id], false)?;
+    let tilt = tilt_of(f.angle);
+    let ok = tilt.is_finite() && tilt.abs() > 1e-9 && f.center.x.is_finite() && f.center.y.is_finite();
+    ok.then(|| (Affine::rotate_about(tilt.to_radians(), f.center), tilt, f.source == "detected"))
+}
+
+/// Góc khung transform (`bbox_angle`) của `n` và mọi object con, theo thứ tự duyệt trước.
+fn collect_angles(n: &Node, out: &mut Vec<f64>) {
+    out.push(n.bbox_angle);
+    for c in n.children().into_iter().flatten() {
+        collect_angles(c, out);
+    }
+}
+
+/// Góc khung `bbox_angle` chỉ lệch bội 90° một sai số tính toán thì đặt đúng bội đó, trong
+/// (-180°, 180°], không để -0°: lần đo sau thấy đúng là đã thẳng.
+fn snap_quarter(n: &mut Node) {
+    let q = (n.bbox_angle / 90.0).round() * 90.0;
+    if (n.bbox_angle - q).abs() < 1e-6 {
+        let r = q.rem_euclid(360.0);
+        let r = if r > 180.0 { r - 360.0 } else { r };
+        n.bbox_angle = if r == 0.0 { 0.0 } else { r };
+    }
+}
+
+/// Góc khung của `n` và mọi object con sau khi dựng thẳng, theo `before` của [`collect_angles`].
+fn settle_angles(n: &mut Node, before: &mut std::vec::IntoIter<f64>, detected: bool) {
+    match before.next() {
+        // Chưa lưu góc (file .ai/PDF): nội dung giờ đã thẳng, khung thẳng như cũ.
+        Some(a) if detected && a == 0.0 => n.bbox_angle = 0.0,
+        _ => snap_quarter(n),
+    }
+    if let Some(children) = n.children_mut() {
+        for c in children.iter_mut() {
+            settle_angles(std::sync::Arc::make_mut(c), before, detected);
+        }
+    }
+}
+
+/// Dựng thẳng `n` bằng phép xoay `m` của [`upright_affine`]. Khung transform của `n` và mọi object
+/// con đi theo phép xoay như mọi lần xoay khác (khung còn lại đúng bội 90°). Riêng khi góc dò từ
+/// hình dạng (`detected`: file .ai/PDF không lưu góc), object nào chưa lưu góc giữ khung thẳng như
+/// cũ, vì nội dung của nó giờ đã thẳng; object con có góc đã lưu vẫn đi theo phép xoay.
+pub(super) fn apply_upright(n: &mut Node, m: Affine, detected: bool) {
+    let mut angles = Vec::new();
+    collect_angles(n, &mut angles);
+    n.transform(m, upright_scaling());
+    settle_angles(n, &mut angles.into_iter(), detected);
+}
+
+/// Bản sao của `id` đã dựng thẳng theo khung transform (cùng tâm khung); tài liệu không đổi.
+pub(super) fn upright_copy(d: &Document, id: NodeId) -> Option<Node> {
+    let mut n = d.node(id)?.clone();
+    if let Some((m, _, detected)) = upright_affine(d, id) {
+        apply_upright(&mut n, m, detected);
+    }
+    Some(n)
+}
+
+/// Dựng thẳng `id` ngay trên tài liệu theo khung transform; trả góc nghiêng đã bỏ (0 khi đã thẳng).
+pub(super) fn make_upright(d: &mut Document, id: NodeId) -> f64 {
+    let Some((m, angle, detected)) = upright_affine(d, id) else { return 0.0 };
+    match d.node_mut(id) {
+        Some(n) => {
+            apply_upright(n, m, detected);
+            angle
+        }
+        None => 0.0,
+    }
+}
+
 /// Trục để raster `ids` theo khung transform (Object › Rasterize `followAngle`): (trang → hệ trục
 /// của khung, góc của khung). Khung thẳng: (Identity, 0).
 pub(crate) fn raster_axes(d: &Document, ids: &[NodeId]) -> (Affine, f64) {
@@ -715,35 +815,51 @@ fn rename(s: &mut Session, p: &Value) -> Result<Value> {
 
 // ---------------------------------------------------------------- dancard.clipToSize
 
-/// Bọc `id` trong clip group: mask chữ nhật `w` × `h` đặt tâm tại tâm vùng nhìn thấy thật.
-/// `follow_angle`: mask xoay theo khung transform của object (object đặt nghiêng vẫn cắt đúng
-/// theo cạnh của nó), tâm là tâm khung transform.
+/// Tâm phần nhìn thấy thật của `n` ([`seen_bounds`], như `visibleUnion` của DanCard; không đo được
+/// thì khung nhìn thấy) trong hệ trục `to_local` (trang → hệ trục cần đo).
+fn seen_centre(n: &Node, to_local: Affine) -> Option<Point> {
+    let probe;
+    let n = if to_local == Affine::IDENTITY {
+        n
+    } else {
+        let mut p = n.clone();
+        p.transform(to_local, vectorcraft_doc::Scaling::default());
+        probe = p;
+        &probe
+    };
+    seen_bounds(n).or_else(|| n.visual_bounds()).filter(|b| b.width() > 0.0 && b.height() > 0.0).map(|b| b.center())
+}
+
+/// Bọc `id` trong clip group như nút Clip của DanCard (`_dcClipToCardStyleCore`, cùng cách Dàn card
+/// clip từng mẫu): mask chữ nhật `w` × `h` (không tô, không viền) đặt tâm tại tâm phần nhìn thấy
+/// thật ([`seen_bounds`]: bỏ object ẩn, guide, path không tô; giao với clip mask); clip group đã có
+/// thì giữ nguyên khung đã chuẩn; xong thì Expand Appearance. `follow_angle`: mask nghiêng theo khung
+/// transform của object (card đặt nghiêng vẫn cắt đúng theo cạnh của nó, tâm phần nhìn thấy đo theo
+/// trục khung), chỉ theo phần nghiêng lẻ (-45°, 45°], nên `w` × `h` vẫn là ngang × dọc như đang thấy
+/// trên trang kể cả khi object đã xoay 90°.
 fn clip_one(d: &mut Document, id: NodeId, w: f64, h: f64, follow_angle: bool) -> std::result::Result<NodeId, String> {
     let n = d.node(id).ok_or("không còn trong tài liệu")?;
-    if matches!(n.kind, NodeKind::Group { clip: true, .. }) {
-        // Clip group đã có thì giữ nguyên khung đã chuẩn (như Dàn Card).
-        return Ok(id);
-    }
     if matches!(n.kind, NodeKind::Layer { .. }) {
         return Err("không clip được cả layer".into());
     }
-    let oriented = if follow_angle { frame_of(d, &[id], false).filter(|f| f.angle != 0.0) } else { None };
-    let (path, angle) = match oriented {
-        Some(f) => {
-            // Dựng mask trong hệ trục của khung đã xoay rồi đưa ra trang.
-            let c = f.to_doc().inverse() * f.center;
-            let local = Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0);
-            (shapes::rectangle(local).transformed(f.to_doc()), f.angle)
-        }
-        None => {
-            let b = seen_bounds(n)
-                .or_else(|| n.visual_bounds())
-                .filter(|b| b.width() > 0.0 && b.height() > 0.0)
-                .ok_or("không đo được vùng hiển thị của object")?;
-            let c = b.center();
-            (shapes::rectangle(Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0)), 0.0)
-        }
+    if matches!(n.kind, NodeKind::Group { clip: true, .. }) {
+        // Clip group đã có thì giữ nguyên khung đã chuẩn (như DanCard), chỉ Expand Appearance.
+        layout::expand(d, id);
+        return Ok(id);
+    }
+    let oriented = if follow_angle {
+        frame_of(d, &[id], false).map(|f| Frame { angle: tilt_of(f.angle), ..f }).filter(|f| f.angle != 0.0 && f.angle.is_finite())
+    } else {
+        None
     };
+    // Đo và dựng mask trong hệ trục của khung đã nghiêng (hoặc của trang), rồi đưa ra trang.
+    let (to_local, to_doc, angle) = match oriented {
+        Some(f) => (f.to_doc().inverse(), f.to_doc(), f.angle),
+        None => (Affine::IDENTITY, Affine::IDENTITY, 0.0),
+    };
+    let c = seen_centre(n, to_local).ok_or("không đo được vùng hiển thị của object")?;
+    let local = Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0);
+    let path = if angle == 0.0 { shapes::rectangle(local) } else { shapes::rectangle(local).transformed(to_doc) };
     let (parent, index, _) = d.position(id).ok_or("không tìm thấy vị trí object")?;
     let mask_id = d.alloc_id();
     let mut mask = Node::new(mask_id, NodeKind::Path { path, rule: FillRule::NonZero, live: None, clipping: true, guide: false });
@@ -753,14 +869,17 @@ fn clip_one(d: &mut Document, id: NodeId, w: f64, h: f64, follow_angle: bool) ->
     // Mask nằm ngay trên object, rồi bọc cả hai: clipping path là con đầu tiên của clip group.
     d.insert(parent, index + 1, mask).map_err(|e| e.to_string())?;
     let gid = d.alloc_id();
-    d.wrap(&[id, mask_id], |mut children| {
-        children.rotate_right(1);
-        let mut g = Node::new(gid, NodeKind::Group { children, clip: true });
-        // Khung transform của clip group đứng cùng góc với mask.
-        g.bbox_angle = angle;
-        g
-    })
-    .map_err(|e| e.to_string())
+    let gid = d
+        .wrap(&[id, mask_id], |mut children| {
+            children.rotate_right(1);
+            let mut g = Node::new(gid, NodeKind::Group { children, clip: true });
+            // Khung transform của clip group đứng cùng góc với mask.
+            g.bbox_angle = angle;
+            g
+        })
+        .map_err(|e| e.to_string())?;
+    layout::expand(d, gid);
+    Ok(gid)
 }
 
 fn clip_to_size(s: &mut Session, p: &Value) -> Result<Value> {
@@ -772,7 +891,7 @@ fn clip_to_size(s: &mut Session, p: &Value) -> Result<Value> {
     if ids.is_empty() {
         return Err(EngineError::Other("Hãy chọn ít nhất 1 object để clip.".into()));
     }
-    let follow_angle = bool_or(p, "followAngle", false);
+    let follow_angle = bool_or(p, "followAngle", true);
     let total = ids.len();
     let (done, errors) = s.edit("Clip theo kích thước (DanCard)", |d, sel| {
         let mut done = Vec::new();
@@ -809,22 +928,36 @@ fn clip_to_size(s: &mut Session, p: &Value) -> Result<Value> {
 /// Sai lệch kích thước chấp nhận sau khi resize (pt).
 const RESIZE_TOL: f64 = 0.01;
 
-/// Co giãn `id` thành `w` × `h` (pt) theo khung transform của nó, giữ tâm. Đo lại sau mỗi lần và
-/// bù tối đa hai lần (viền không co giãn, ảnh…), như DanCard.
+/// Rộng × cao của khung `f` theo phần nghiêng lẻ của nó ([`tilt_of`]): ngang × dọc như đang thấy
+/// trên trang (khung đã xoay 90° thì đổi chỗ), cùng góc nghiêng đó.
+fn page_dims(f: &Frame) -> Option<(f64, f64, f64)> {
+    if !f.angle.is_finite() {
+        return None;
+    }
+    let tilt = tilt_of(f.angle);
+    let quarters = ((f.angle - tilt) / 90.0).round();
+    let odd = quarters.is_finite() && (quarters as i64).rem_euclid(2) == 1;
+    Some(if odd { (f.height, f.width, tilt) } else { (f.width, f.height, tilt) })
+}
+
+/// Co giãn `id` thành `w` × `h` (pt) theo khung transform của nó, giữ tâm: `w` × `h` là ngang × dọc
+/// như đang thấy trên trang (DanCard đo khung của trang), dọc theo trục khung nghiêng. Đo lại sau
+/// mỗi lần và bù tối đa hai lần (viền không co giãn, ảnh…), như DanCard.
 fn resize_one(d: &mut Document, id: NodeId, w: f64, h: f64, visual: bool, sc: vectorcraft_doc::Scaling) -> std::result::Result<(), String> {
     for _ in 0..3 {
         let f = frame_of(d, &[id], visual).ok_or("không đo được khung của object")?;
-        if !(f.width > 0.0 && f.height > 0.0) {
+        let (fw, fh, tilt) = page_dims(&f).ok_or("không đo được khung của object")?;
+        if !(fw > 0.0 && fh > 0.0) {
             return Err("kích thước object không hợp lệ".into());
         }
-        if (f.width - w).abs() <= RESIZE_TOL && (f.height - h).abs() <= RESIZE_TOL {
+        if (fw - w).abs() <= RESIZE_TOL && (fh - h).abs() <= RESIZE_TOL {
             return Ok(());
         }
-        let (sx, sy) = (w / f.width, h / f.height);
+        let (sx, sy) = (w / fw, h / fh);
         if !(sx.is_finite() && sy.is_finite()) {
             return Err("không tính được tỉ lệ resize".into());
         }
-        let a = f.angle.to_radians();
+        let a = tilt.to_radians();
         let c = f.center.to_vec2();
         let m = Affine::translate(c) * Affine::rotate(-a) * Affine::scale_non_uniform(sx, sy) * Affine::rotate(a) * Affine::translate(-c);
         let n = d.node_mut(id).ok_or("không còn trong tài liệu")?;
@@ -833,10 +966,9 @@ fn resize_one(d: &mut Document, id: NodeId, w: f64, h: f64, visual: bool, sc: ve
         n.bbox_angle = f.angle;
     }
     let f = frame_of(d, &[id], visual).ok_or("không đo được khung của object")?;
-    if (f.width - w).abs() <= 1.0 && (f.height - h).abs() <= 1.0 {
-        Ok(())
-    } else {
-        Err("không thể đặt đúng kích thước cho object này".into())
+    match page_dims(&f) {
+        Some((fw, fh, _)) if (fw - w).abs() <= 1.0 && (fh - h).abs() <= 1.0 => Ok(()),
+        _ => Err("không thể đặt đúng kích thước cho object này".into()),
     }
 }
 

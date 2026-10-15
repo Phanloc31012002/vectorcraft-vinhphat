@@ -9,13 +9,16 @@
 //! - Đường bế (path khép kín, compound path, group; clipping path cũng tính) được làm phẳng với
 //!   dung sai 0,00025 mm rồi xếp bằng lõi silhouette (`dancard_be_nester.rs`): xoay 0/90/180/270°,
 //!   khe giữa đường bế, lề, né PON tính từ mép chấm. Bài chỉ đi theo khuôn, không được đo khi xếp.
+//!   Khuôn đặt nghiêng (góc xoay trong app, hoặc khuôn chữ nhật đặt nghiêng trong file .ai) được
+//!   dựng thẳng theo khung transform trước khi xếp; Bài bỏ cùng góc với khuôn.
 //! - Mặc định mỗi mẫu một tờ riêng; `multiPerArtboard` gộp mọi mẫu vào một tờ (số con mỗi mẫu
 //!   lệch nhau tối đa 1).
 //! - Vẽ: mỗi tờ một artboard "Dan be…", ba layer "Dàn bế - PON / Khuôn / Bài…" (Khuôn dưới cùng,
 //!   PON trên cùng). Hai mặt: tờ mặt sau bên phải, lật ngang (khuôn lật gương, vị trí và PON đối
-//!   xứng; bài mặt sau chỉ xoay ngược, không lật). Tờ mới đặt vào chỗ trống bên phải mọi artboard
-//!   và hình đang có (DanCard đặt từ góc canvas). Như DanCard, mọi artboard cũ bị xoá; khuôn và bài
-//!   nguồn giữ nguyên.
+//!   xứng; bài mặt sau chỉ xoay ngược, không lật). Như DanCard, tờ mới đặt từ góc trên trái canvas
+//!   (±7200 pt), trái sang phải rồi xuống hàng, cách 10 mm, né artboard đang có và vùng nguồn, cặp
+//!   hai mặt không bị tách; VectorCraft không có tuỳ chọn Large Canvas nên lô quá canvas thường tự
+//!   dùng vùng rộng gấp 10. Mọi artboard cũ bị xoá; khuôn và bài nguồn giữ nguyên.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -46,8 +49,11 @@ const MAX_DEPTH: u32 = 18;
 const MAX_DIE_POINTS: usize = 300_000;
 /// Khoảng cách giữa các tờ, giữa mặt trước và mặt sau (mm).
 const PAGE_GAP: f64 = 10.0;
-/// Bề ngang một hàng tờ (pt): như canvas 14400 pt của DanCard trừ lề hai bên.
-const ROW_WIDTH: f64 = 14_400.0 - 2.0 * PAGE_GAP * MM;
+/// Nửa cạnh canvas thường (pt), như Illustrator; Large Canvas lớn gấp 10.
+const CANVAS_HALF: f64 = 7200.0;
+const LARGE_CANVAS_HALF: f64 = 72_000.0;
+/// Số lần thử chỗ tối đa cho một tờ (như DanCard).
+const MAX_ATTEMPTS: usize = 5000;
 /// Dấu nhận biết layer kết quả (Layer.note của DanCard).
 const OUTPUT_NOTE: &str = "DANCARD_DANBE_OUTPUT";
 const LABEL: &str = "Dàn bế (DanCard)";
@@ -58,7 +64,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         "DanCard: Dàn bế",
         [],
         None,
-        "{paperW?, paperH?: cm (khổ tờ, mặc định 33 × 35,4), ponTop?, ponBottom?, ponLeft?, ponRight?: mm (từ mép tờ đến tâm chấm PON tròn 5 mm, mặc định 10), gap?: mm (khe giữa 2 đường bế, mặc định 2), margin?: mm (khuôn cách mép tờ, mặc định 4), ponClear?: mm (né PON tính từ mép chấm, mặc định 7,5), twoSided?: bool (dàn 2 mặt: bộ ba Khuôn → mặt trước → mặt sau; mặt sau lật ngang), multiPerArtboard?: bool (gộp mọi mẫu vào một tờ; mặc định mỗi mẫu một tờ)}; số nhận số JSON hoặc chuỗi kiểu \"7,5\", chuỗi trống lấy mặc định. Mẫu: chọn từng cặp Khuôn (trái) → Bài (phải) cùng hàng, hoặc không chọn gì để lấy theo layer Khuôn bế / Bài (2 mặt: Khuôn bế / Mặt trước / Mặt sau). Xếp đường bế thật (xoay 0/90/180/270°), vẽ 4 chấm PON, artboard, layer PON / Khuôn / Bài; tờ mới đặt bên phải những gì đang có, artboard cũ bị xoá như DanCard; một bước hoàn tác → {message, count, sheets, counts, twoSided, separate, plans: [{model, count, counts, mode, centred, offsetMm, detail}]}",
+        "{paperW?, paperH?: cm (khổ tờ, mặc định 33 × 35,4), ponTop?, ponBottom?, ponLeft?, ponRight?: mm (từ mép tờ đến tâm chấm PON tròn 5 mm, mặc định 10), gap?: mm (khe giữa 2 đường bế, mặc định 2), margin?: mm (khuôn cách mép tờ, mặc định 4), ponClear?: mm (né PON tính từ mép chấm, mặc định 7,5), twoSided?: bool (dàn 2 mặt: bộ ba Khuôn → mặt trước → mặt sau; mặt sau lật ngang), multiPerArtboard?: bool (gộp mọi mẫu vào một tờ; mặc định mỗi mẫu một tờ)}; số nhận số JSON hoặc chuỗi kiểu \"7,5\", chuỗi trống lấy mặc định. Mẫu: chọn từng cặp Khuôn (trái) → Bài (phải) cùng hàng, hoặc không chọn gì để lấy theo layer Khuôn bế / Bài (2 mặt: Khuôn bế / Mặt trước / Mặt sau). Xếp đường bế thật (xoay 0/90/180/270°), vẽ 4 chấm PON, artboard, layer PON / Khuôn / Bài; tờ mới đặt từ góc trên trái canvas như DanCard (cách 10 mm, né artboard và nguồn; quá khổ canvas thường thì dùng vùng Large Canvas), artboard cũ bị xoá như DanCard; một bước hoàn tác → {message (tờ chung: \"OK:[[COUNT:n]] …\"; tờ riêng: \"OK: Đã tạo …\"), count, sheets, counts, twoSided, separate, plans: [{model, count, counts, mode, centred, offsetMm, detail}]}",
         has_doc,
         die_layout
     )]
@@ -325,7 +331,8 @@ fn find_layer(d: &Document, role: Role) -> Option<&Arc<Node>> {
     })
 }
 
-/// Các object cấp đầu đang hiện của layer, đo được.
+/// Các object cấp đầu đang hiện của layer, đo được, trên cùng trước (thứ tự `pageItems` của
+/// DanCard: số thứ tự mẫu và cách ghép gần nhất khi bằng nhau theo đúng thứ tự đó).
 fn layer_items(layer: &Node, geometric: bool) -> Vec<Rec> {
     if !layer.visible {
         return Vec::new();
@@ -334,6 +341,7 @@ fn layer_items(layer: &Node, geometric: bool) -> Vec<Rec> {
         .children()
         .into_iter()
         .flatten()
+        .rev()
         .filter(|c| !c.is_layer() && c.visible)
         .filter_map(|c| {
             let b = if geometric { geometric_first(c) } else { visible_first(c) }?;
@@ -417,11 +425,16 @@ fn source_models(d: &Document, roots: &[NodeId], two: bool) -> std::result::Resu
 // ---------------------------------------------------------------- đọc đường bế
 
 /// Đường bế của một mẫu: đường bao mm (y hướng lên, khung từ 0), có đoạn cong không, khung các
-/// điểm đã làm phẳng trên trang (pt).
+/// điểm đã làm phẳng trên trang (pt) của khuôn đã dựng thẳng, phép dựng thẳng khuôn theo khung
+/// transform của nó, góc nghiêng đã bỏ (độ, ngược chiều kim đồng hồ; Bài bỏ cùng góc để đi theo
+/// khuôn) và góc đó có phải dò từ hình dạng (file .ai không lưu góc) không.
 struct Die {
     groups: Groups,
     curve: bool,
     bbox: Rect,
+    upright: Affine,
+    tilt: f64,
+    detected: bool,
 }
 
 type PtGroups = Vec<Vec<Vec<Point>>>;
@@ -566,7 +579,7 @@ fn read_die(n: &Node, mi: usize) -> std::result::Result<Die, String> {
     if mm.is_empty() {
         return Err(none());
     }
-    Ok(Die { groups: mm, curve, bbox })
+    Ok(Die { groups: mm, curve, bbox, upright: Affine::IDENTITY, tilt: 0.0, detected: false })
 }
 
 // ---------------------------------------------------------------- tìm cách dàn
@@ -656,28 +669,84 @@ fn turn(deg: i64, c: Point) -> Affine {
     Affine::translate(c.to_vec2()) * Affine::new([cos, -sin, sin, cos, 0.0, 0.0]) * Affine::translate(-c.to_vec2())
 }
 
-/// Các vị trí tờ (mặt trước): bên phải mọi artboard và hình đang có, trái sang phải, hết hàng thì
-/// xuống dưới; hai mặt thì mặt sau ngay bên phải mặt trước.
-fn sheet_positions(d: &Document, w: f64, h: f64, two: bool, count: usize) -> Result<Vec<Rect>> {
+/// `dcDanBeOutputPositions`: chỗ của `count` tờ (mặt trước; hai mặt thì mặt sau ngay bên phải,
+/// cách 10 mm, giữ nguyên cặp khi xuống hàng) trên canvas cạnh `2 × half`: từ góc trên trái, trái
+/// sang phải rồi xuống hàng, cách nhau 10 mm; tránh các artboard đang có (trừ khung làm việc phủ
+/// gần hết canvas) và vùng các object nguồn. Giữ chỗ cho cả lô trước khi vẽ.
+fn output_positions(
+    w: f64,
+    h: f64,
+    two: bool,
+    count: usize,
+    half: f64,
+    existing: &[Rect],
+    source: Option<Rect>,
+) -> std::result::Result<Vec<Rect>, String> {
     let gap = PAGE_GAP * MM;
-    let bundle_w = if two { 2.0 * w + gap } else { w };
-    let used = d.artboards.iter().fold(d.art_bounds(), |acc, a| vectorcraft_geom::union_opt(acc, Some(a.rect)));
-    let (left, top) = used.map_or((0.0, 0.0), |u| (u.x1 + gap, u.y0));
-    let (mut x, mut y) = (left, top);
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        if x > left && x + bundle_w > left + ROW_WIDTH {
-            x = left;
-            y += h + gap;
-        }
-        out.push(Rect::new(x, y, x + w, y + h));
-        x += bundle_w + gap;
+    let area = Rect::new(-half + gap, -half + gap, half - gap, half - gap);
+    let bundle_w = if two { w * 2.0 + gap } else { w };
+    let sane = w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 && count >= 1;
+    if !sane || bundle_w > area.width() + EPS || h > area.height() + EPS {
+        return Err("Khổ tờ/cặp hai mặt vượt giới hạn canvas. Hãy giảm khổ hoặc bớt artboard cũ.".into());
     }
-    let inside = |v: f64| v.is_finite() && v.abs() <= crate::MAX_COORD;
-    if !out.iter().all(|r| inside(r.x0) && inside(r.y0) && inside(r.x0 + bundle_w) && inside(r.y1)) {
-        return Err(fail("Không còn chỗ trong canvas để tạo đủ tờ. Hãy bớt artboard cũ."));
+    let overlaps = |a: &Rect, b: &Rect| a.x0 < b.x1 - EPS && a.x1 > b.x0 + EPS && a.y0 < b.y1 - EPS && a.y1 > b.y0 + EPS;
+    let contains = |a: &Rect, b: &Rect| a.x0 <= b.x0 + EPS && a.y0 <= b.y0 + EPS && a.x1 >= b.x1 - EPS && a.y1 >= b.y1 - EPS;
+    // Khung làm việc phủ cả canvas không phải tờ in cần né (giống KTS).
+    let mut occupied: Vec<Rect> = existing.iter().filter(|r| !(r.width() >= half * 1.84 && r.height() >= half * 1.84)).copied().collect();
+    if let Some(src) = source
+        && !occupied.iter().any(|o| contains(o, &src))
+    {
+        occupied.push(src);
+    }
+    let (mut cursor_x, mut cursor_y) = (area.x0, area.y0);
+    let mut out = Vec::with_capacity(count.min(MAX_ATTEMPTS));
+    for _ in 0..count {
+        let (mut x, mut y) = (cursor_x, cursor_y);
+        let mut placed = None;
+        for _ in 0..MAX_ATTEMPTS {
+            if x + bundle_w > area.x1 + EPS {
+                x = area.x0;
+                y += h + gap;
+                continue;
+            }
+            if y + h > area.y1 + EPS {
+                return Err("Không còn chỗ trong canvas để tạo đủ tờ. Hãy bớt artboard cũ.".into());
+            }
+            let bundle = Rect::new(x, y, x + bundle_w, y + h);
+            if let Some(b) = occupied.iter().find(|o| overlaps(&bundle, o)) {
+                x = b.x1 + gap;
+                continue;
+            }
+            occupied.push(bundle);
+            placed = Some(Rect::new(x, y, x + w, y + h));
+            break;
+        }
+        let Some(r) = placed else {
+            return Err("Không tìm được vị trí trong canvas để đặt artboard mới.".into());
+        };
+        out.push(r);
+        (cursor_x, cursor_y) = (x + bundle_w + gap, y);
     }
     Ok(out)
+}
+
+/// Như DanCard: canvas thường trước. VectorCraft không có tuỳ chọn Large Canvas, nên tờ hay lô quá
+/// canvas thường thì dùng luôn vùng rộng gấp 10 như tài liệu Large Canvas của Illustrator.
+fn plan_positions(w: f64, h: f64, two: bool, count: usize, existing: &[Rect], source: Option<Rect>) -> std::result::Result<Vec<Rect>, String> {
+    output_positions(w, h, two, count, CANVAS_HALF, existing, source)
+        .or_else(|_| output_positions(w, h, two, count, LARGE_CANVAS_HALF, existing, source))
+}
+
+/// Vị trí các tờ mới trong tài liệu: tránh artboard đang có và vùng khuôn, bài nguồn.
+fn sheet_positions(d: &Document, models: &[(Model, Die)], w: f64, h: f64, two: bool, count: usize) -> Result<Vec<Rect>> {
+    let existing: Vec<Rect> = d.artboards.iter().map(|a| a.rect).collect();
+    let mut source: Option<Rect> = None;
+    for (m, _) in models {
+        for id in [Some(m.khuon), Some(m.bai), if two { m.sau } else { None }].into_iter().flatten() {
+            source = vectorcraft_geom::union_opt(source, d.node(id).and_then(visible_first));
+        }
+    }
+    plan_positions(w, h, two, count, &existing, source).map_err(fail)
 }
 
 fn unique_layer_name(d: &Document, base: &str) -> String {
@@ -742,10 +811,19 @@ fn finish_face(d: &mut Document, f: &Face) {
     }
 }
 
-/// Bản sao của bài `id` xoay `deg`, tâm khung nhìn thấy đặt tại `at`.
-fn art_copy(d: &mut Document, id: NodeId, deg: i64, at: Point) -> Result<Node> {
+/// Bản sao của bài `id` bỏ góc nghiêng `tilt` của khuôn (độ, ngược chiều kim đồng hồ), xoay `deg`,
+/// tâm khung nhìn thấy đặt tại `at`. Bài đi theo khuôn nên nội dung của nó nghiêng cùng khuôn: góc
+/// khung đã lưu của bài đi theo phép xoay, object của bài chưa lưu góc (file .ai) giữ khung thẳng,
+/// dù góc của khuôn là lưu hay dò từ hình dạng.
+fn art_copy(d: &mut Document, id: NodeId, tilt: f64, deg: i64, at: Point) -> Result<Node> {
     let src = d.node(id).cloned().ok_or(EngineError::NoNode(id))?;
     let mut n = d.reid(&src);
+    if tilt != 0.0
+        && tilt.is_finite()
+        && let Some(b) = visible_first(&n)
+    {
+        super::apply_upright(&mut n, Affine::rotate_about(tilt.to_radians(), b.center()), true);
+    }
     if deg.rem_euclid(360) != 0
         && let Some(b) = visible_first(&n)
     {
@@ -756,6 +834,7 @@ fn art_copy(d: &mut Document, id: NodeId, deg: i64, at: Point) -> Result<Node> {
     Ok(n)
 }
 
+#[derive(Debug)]
 struct Rendered {
     total: usize,
     counts: Vec<String>,
@@ -811,7 +890,7 @@ fn render(d: &mut Document, models: &[(Model, Die)], o: &Opts, separate: bool, s
     if two && let Some(i) = models.iter().position(|(m, _)| m.sau.is_none()) {
         return Err(fail(format!("Thiếu mặt sau của mẫu {}. Hãy chọn đủ Khuôn → trước → sau.", i + 1)));
     }
-    let positions = sheet_positions(d, w, h, two, sheets.len())?;
+    let positions = sheet_positions(d, models, w, h, two, sheets.len())?;
     let first_new = d.artboards.len();
     let gap = PAGE_GAP * MM;
     for (sheet, &rect) in sheets.iter().zip(&positions) {
@@ -830,11 +909,15 @@ fn render(d: &mut Document, models: &[(Model, Die)], o: &Opts, separate: bool, s
             let shift = Vec2::new(rect.x0 + s.x * MM - rb.x0, rect.y1 - s.y * MM - rb.y1);
             let src = d.node(model.khuon).cloned().ok_or(EngineError::NoNode(model.khuon))?;
             let mut cut = d.reid(&src);
+            // Dựng thẳng trước (khung transform đúng cả khi góc dò từ file .ai), rồi xoay, đặt.
+            if die.tilt != 0.0 {
+                super::apply_upright(&mut cut, die.upright, die.detected);
+            }
             cut.transform(Affine::translate(shift) * rot, scaling());
             let at = (rb + shift).center();
-            arts.push(art_copy(d, model.bai, deg, at)?);
+            arts.push(art_copy(d, model.bai, die.tilt, deg, at)?);
             if two {
-                placed.push((cut.clone(), *model, deg, at));
+                placed.push((cut.clone(), *model, deg, at, die.tilt));
             }
             cuts.push(cut);
         }
@@ -846,7 +929,7 @@ fn render(d: &mut Document, models: &[(Model, Die)], o: &Opts, separate: bool, s
             let back_rect = Rect::new(rect.x1 + gap, rect.y0, rect.x1 + gap + w, rect.y1);
             let back = add_face(d, back_rect, &format!("{suffix} - mặt sau"), true, o)?;
             let (mut cuts, mut arts) = (Vec::new(), Vec::new());
-            for (cut, model, deg, c) in placed {
+            for (cut, model, deg, c, tilt) in placed {
                 // Lật tờ theo chiều ngang: tâm đối xứng qua trục dọc giữa tờ, cùng độ cao.
                 let back_x = back_rect.x0 + w - (c.x - rect.x0);
                 let mut k = d.reid(&cut);
@@ -855,7 +938,7 @@ fn render(d: &mut Document, models: &[(Model, Die)], o: &Opts, separate: bool, s
                 cuts.push(k);
                 let sau = model.sau.ok_or_else(|| fail("Thiếu mặt sau của mẫu. Hãy chọn đủ Khuôn → trước → sau."))?;
                 // Bài mặt sau xoay ngược lại, không bao giờ lật gương.
-                arts.push(art_copy(d, sau, -deg, Point::new(back_x, c.y))?);
+                arts.push(art_copy(d, sau, tilt, -deg, Point::new(back_x, c.y))?);
             }
             fill_layer(d, back.cut, cuts.into_iter().rev().collect());
             fill_layer(d, back.art, arts.into_iter().rev().collect());
@@ -870,18 +953,52 @@ fn render(d: &mut Document, models: &[(Model, Die)], o: &Opts, separate: bool, s
 
 // ---------------------------------------------------------------- lệnh
 
+/// Thông báo kết quả như `dcDanBeRender`: tờ riêng "OK: Đã tạo …"; tờ chung "OK:[[COUNT:n]] …"
+/// (panel hiện dòng đậm "n con / tờ", n là số con thật trên một mặt) với chi tiết của lõi dàn.
+fn report(separate: bool, two: bool, sheets: usize, total: usize, counts: &[String], first_detail: Option<&str>) -> String {
+    let mut detail = if separate {
+        format!("Đã tạo {sheets}{}; tổng {total} con. {}.", if two { " cặp artboard trước/sau" } else { " artboard riêng" }, counts.join("; "))
+    } else {
+        first_detail.map_or_else(|| format!("Dàn silhouette thật: {total} con."), str::to_string)
+    };
+    detail.push_str(" Khuôn và Bài nằm ở layer riêng; PON giữ ở layer trên cùng.");
+    if two {
+        if !separate {
+            detail.push_str(&format!(" Đã tạo {sheets} cặp artboard trước/sau."));
+        }
+        detail.push_str(" Hai mặt dùng chung bố cục khuôn, đối xứng lật ngang; không lật gương chữ/hình.");
+    }
+    if separate { format!("OK: {detail}") } else { format!("OK:[[COUNT:{total}]] {detail}") }
+}
+
 fn die_layout(s: &mut Session, p: &Value) -> Result<Value> {
     if s.active().is_none() {
         return Err(fail("Chưa mở tài liệu nào."));
     }
     let o = opts(p).map_err(fail)?;
+    // Như Prepare: từ chối tờ / cặp quá khổ canvas trước khi tốn thời gian tìm bố cục.
+    plan_positions(o.paper_w * MM, o.paper_h * MM, o.two_sided, 1, &[], None).map_err(fail)?;
     let roots = roots_in_paint_order(s)?;
     let st = s.doc()?;
     let models = source_models(&st.doc, &roots, o.two_sided).map_err(fail)?;
     let mut prepared = Vec::with_capacity(models.len());
     for (mi, m) in models.iter().enumerate() {
+        // Khuôn đặt nghiêng (góc xoay trong app, hoặc khuôn chữ nhật nghiêng trong file .ai): dựng
+        // thẳng theo khung transform rồi mới đọc đường bế; Bài bỏ cùng góc khi đặt.
         let n = st.doc.node(m.khuon).ok_or(EngineError::NoNode(m.khuon))?;
-        prepared.push((*m, read_die(n, mi).map_err(fail)?));
+        let die = match super::upright_affine(&st.doc, m.khuon) {
+            Some((upright, tilt, detected)) => {
+                let mut up = n.clone();
+                up.transform(upright, scaling());
+                let mut die = read_die(&up, mi).map_err(fail)?;
+                die.upright = upright;
+                die.tilt = tilt;
+                die.detected = detected;
+                die
+            }
+            None => read_die(n, mi).map_err(fail)?,
+        };
+        prepared.push((*m, die));
     }
     if prepared.is_empty() {
         return Err(fail("Không có mẫu khuôn hợp lệ để dàn."));
@@ -896,19 +1013,7 @@ fn die_layout(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(r)
     })?;
     let n = sheets.len();
-    let mut detail = if separate {
-        format!("Đã tạo {n}{}; tổng {} con. {}.", if two { " cặp artboard trước/sau" } else { " artboard riêng" }, done.total, done.counts.join("; "))
-    } else {
-        sheets.first().map_or_else(|| format!("Dàn silhouette thật: {} con.", done.total), |p| p.out.detail.clone())
-    };
-    detail.push_str(" Khuôn và Bài nằm ở layer riêng; PON giữ ở layer trên cùng.");
-    if two {
-        if !separate {
-            detail.push_str(&format!(" Đã tạo {n} cặp artboard trước/sau."));
-        }
-        detail.push_str(" Hai mặt dùng chung bố cục khuôn, đối xứng lật ngang; không lật gương chữ/hình.");
-    }
-    let message = if separate { format!("OK: {detail}") } else { format!("OK: {} con / tờ\n{detail}", done.total) };
+    let message = report(separate, two, n, done.total, &done.counts, sheets.first().map(|p| p.out.detail.as_str()));
     let plans: Vec<Value> = sheets
         .iter()
         .map(|p| {
@@ -937,3 +1042,7 @@ fn die_layout(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 #[path = "dancard_be_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dancard_be_goc_tests.rs"]
+mod goc_tests;

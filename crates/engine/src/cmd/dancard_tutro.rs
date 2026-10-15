@@ -17,6 +17,9 @@
 //! giấy (4 góc artboard) nằm trên ba layer mới, layer PON khóa lại. Cặp đã dàn bị xoá, cặp chưa vừa
 //! giữ nguyên chỗ cũ để dàn tiếp vào tờ sau. Cả lần dàn là một bước hoàn tác.
 //!
+//! Khác DanCard: mỗi mặt được đo và nhân bản theo khung transform (mặt xoay trong app hay đặt
+//! nghiêng trong file .ai được dựng thẳng trước), không theo khung thẳng của trang.
+//!
 //! Bộ tính viết theo toạ độ của DanCard (y hướng lên, tờ giấy là [0, cao, rộng, 0], mm của DanCard)
 //! để ra đúng các vector đối chiếu; chỉ lúc dựng mới đổi sang trang của VectorCraft (y hướng xuống).
 
@@ -1359,7 +1362,7 @@ fn tu_tro(s: &mut Session, p: &Value) -> Result<Value> {
             skipped.push(format!("{} (không rõ loại)", si + 1));
             continue;
         };
-        match bounds_of(n, d) {
+        match super::upright_copy(d, *id).and_then(|u| bounds_of(&u, d)) {
             Some(r) => found.push(Item { id: *id, b: [r.x0, -r.y0, r.x1, -r.y1] }),
             None => skipped.push(format!("{} ({})", si + 1, n.kind_label())),
         }
@@ -1404,8 +1407,9 @@ fn tu_tro(s: &mut Session, p: &Value) -> Result<Value> {
         let (mut fronts, mut backs, mut gone) = (vec![], vec![], vec![]);
         for (k, (pi, slots)) in job.assignments.iter().enumerate() {
             let &(fid, bid) = ids_of.get(*pi).ok_or_else(|| other("Lỗi tạo vị trí dàn. Hãy thử lại."))?;
-            let front = d.node(fid).cloned().ok_or(EngineError::NoNode(fid))?;
-            let back = d.node(bid).cloned().ok_or(EngineError::NoNode(bid))?;
+            // Bản dựng thẳng theo khung transform của từng mặt: bóp và nhân bản từ đây.
+            let front = super::upright_copy(d, fid).ok_or(EngineError::NoNode(fid))?;
+            let back = super::upright_copy(d, bid).ok_or(EngineError::NoNode(bid))?;
             // Bóp một lần cho mỗi mặt rồi nhân bản bản mẫu đó.
             let (front, back) = match job.targets.as_ref().and_then(|t| t.get(k)) {
                 Some([ft, bt]) => (squeezed(&front, d, *ft, job.mixed)?, squeezed(&back, d, *bt, job.mixed)?),

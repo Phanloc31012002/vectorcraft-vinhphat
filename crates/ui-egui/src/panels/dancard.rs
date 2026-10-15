@@ -207,6 +207,31 @@ fn run_and_note(app: &mut VectorcraftApp, ui: &Ui, area: &str, id: &str, params:
     out
 }
 
+/// `[[COUNT:n]]` ở đầu thông báo (`^\[\[COUNT:(\d+)\]\]\s*` của DanCard) → (n, phần còn lại).
+fn count_prefix(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("[[COUNT:")?;
+    let end = rest.find("]]")?;
+    let n = rest.get(..end)?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((n, rest.get(end + 2..)?.trim_start()))
+}
+
+/// Ô kết quả như `showCountResult` của DanCard: "[[COUNT:n]] …" thành dòng đậm "n con / tờ" rồi
+/// ghi chú; lỗi và thông báo khác như `show_note`.
+fn show_count_note(ui: &mut Ui, area: &str, t: &Tokens, hint: &str) {
+    let Note(text, err) = pstate::<Note>(ui.ctx(), &note_id(area));
+    if !err && let Some((n, rest)) = count_prefix(&text) {
+        ui.label(RichText::new(format!("{n} con / tờ")).strong().color(t.text));
+        if !rest.is_empty() {
+            ui.label(RichText::new(rest).color(t.text));
+        }
+        return;
+    }
+    show_note(ui, area, t, hint);
+}
+
 fn show_note(ui: &mut Ui, area: &str, t: &Tokens, hint: &str) {
     let Note(text, err) = pstate::<Note>(ui.ctx(), &note_id(area));
     if text.is_empty() {
@@ -276,7 +301,7 @@ fn header(app: &mut VectorcraftApp, ui: &mut Ui) {
                     if ui.add_enabled(has_selection, egui::Button::new(ok)).clicked() {
                         let mut params = json!({"width": w, "height": h, "unit": unit});
                         if open == Popover::Clip {
-                            params["followAngle"] = json!(saved_bool(app, "clipFollowAngle", false));
+                            params["followAngle"] = json!(saved_bool(app, "clipFollowAngle", true));
                         }
                         if run_and_note(app, ui, "header", command, params).is_some() {
                             open = Popover::None;
@@ -285,7 +310,7 @@ fn header(app: &mut VectorcraftApp, ui: &mut Ui) {
                 });
             });
             if open == Popover::Clip {
-                check_box(app, ui, "clipFollowAngle", "Khung clip xoay theo card đặt nghiêng", false);
+                check_box(app, ui, "clipFollowAngle", "Khung clip theo khung transform (card xoay, đặt nghiêng)", true);
             }
         });
     }
@@ -397,11 +422,10 @@ fn layout_tab(app: &mut VectorcraftApp, ui: &mut Ui) {
     ui.add_space(6.0);
     let has_selection = app.session.active().is_some_and(|st| !st.selection.objects.is_empty());
     if ui.add_enabled(has_selection, egui::Button::new("Dàn card")).clicked() {
-        let artboard = app.view().map_or(0, |v| v.artboard);
         let params = json!({
             "layout": key, "voucherWithCard": with_card, "width": w, "height": h, "gap": gap,
             "rotation": rot, "offset": kind == "offset", "note": note,
-            "pon": saved(app, "ponPath", ""), "artboard": artboard,
+            "pon": saved(app, "ponPath", ""),
         });
         run_and_note(app, ui, "danfile", "dancard.layout", params);
     }

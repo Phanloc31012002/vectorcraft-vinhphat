@@ -1,0 +1,70 @@
+# DanCard (IN Vĩnh Phát): gộp bản mới của VectorCraft (storytold/vectorcraft main) vào nhánh
+# `dancard`, chạy test của DanCard, qua thì đẩy lên `dancard` và build bản Windows.
+# Chạy tay ở tab Actions (Run workflow), và tự chạy sáng thứ Hai 08:00 giờ Việt Nam.
+# GitHub chỉ hiện nút Run workflow và chỉ chạy lịch khi file này nằm trên nhánh mặc định: đặt
+# `dancard` làm nhánh mặc định của fork (Settings › General › Default branch), xem DANCARD.md.
+# Bản VectorCraft mới có sửa .github/workflows thì GITHUB_TOKEN không được đẩy: cần secret
+# DANCARD_SYNC_TOKEN (token có quyền Contents + Workflows); có token thì lần đẩy tự build Windows.
+# Đụng nhau với code DanCard thì không đổi gì, trang tóm tắt của lần chạy liệt kê các file cần sửa.
+name: DanCard đồng bộ VectorCraft
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * 1"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: dancard-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dancard
+          fetch-depth: 0
+          # Token riêng (nếu có) để đẩy được cả thay đổi .github/workflows của bản gốc.
+          token: ${{ secrets.DANCARD_SYNC_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          # Bộ cài tối thiểu không có clippy: sync.sh cần cả hai.
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dancard-sync
+      - name: Thư viện hệ thống cho giao diện
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - name: Gộp VectorCraft mới và kiểm tra DanCard
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash .github/dancard/sync.sh
+      - name: Đẩy lên dancard và build bản Windows
+        if: steps.sync.outputs.status == 'merged'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_SYNC_TOKEN: ${{ secrets.DANCARD_SYNC_TOKEN != '' }}
+        run: |
+          if ! git push origin HEAD:dancard; then
+            {
+              echo "### Không đẩy được lên dancard"
+              echo "Thường là do bản VectorCraft mới có sửa file trong .github/workflows: GITHUB_TOKEN không được đẩy những file đó."
+              echo "Tạo token (fine-grained, repo này, quyền Contents và Workflows: Read and write), lưu vào Settings › Secrets and variables › Actions với tên DANCARD_SYNC_TOKEN, rồi chạy lại."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # Đẩy bằng token riêng thì workflow Windows tự chạy (trigger push). Đẩy bằng GITHUB_TOKEN
+          # thì GitHub không chạy workflow khác: gọi build trực tiếp, ghi rõ repo này (remote
+          # `upstream` của bản gốc đứng trước `origin` nên gh sẽ chọn nhầm sang bản gốc).
+          if [ "$HAS_SYNC_TOKEN" != "true" ]; then
+            gh workflow run dancard-windows.yml --ref dancard --repo "$GITHUB_REPOSITORY"
+          fi

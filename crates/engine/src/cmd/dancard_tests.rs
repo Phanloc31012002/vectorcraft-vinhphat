@@ -403,3 +403,368 @@ fn catalogue_a4_mot_cuon_a5_hai_cuon_xoay() {
     run(&mut s, "select.set", json!({"ids": [ids[0], ids[1], ids[2]]}));
     assert!(s.execute("dancard.catalogue", &json!({"width": 14.8, "height": 21})).is_err());
 }
+
+/// Số ảnh trong tài liệu (lệnh dàn không được tự raster).
+fn images(s: &Session) -> usize {
+    let mut n = 0;
+    s.doc().unwrap().doc.walk(|node| {
+        if matches!(node.kind, NodeKind::Image(_)) {
+            n += 1;
+        }
+    });
+    n
+}
+
+/// Mẫu xoay 90° trong app và mẫu đặt nghiêng 17°: Dàn card đo theo khung transform, dựng thẳng rồi
+/// dàn, không báo sai khổ, không raster; mọi bản đúng 9,2 × 5,6 và đứng thẳng trong khung clip.
+#[test]
+fn dan_card_do_theo_khung_transform_khong_raster() {
+    let (mut s, ids) = card_sources(2, 1);
+    run(&mut s, "select.set", json!({"ids": [ids[0].0]}));
+    run(&mut s, "object.rotate", json!({"angle": 90}));
+    run(&mut s, "select.set", json!({"ids": [ids[1].0]}));
+    run(&mut s, "object.rotate", json!({"angle": 17}));
+    run(&mut s, "select.set", json!({"ids": [ids[0].0, ids[1].0]}));
+    let out = run(&mut s, "dancard.layout", json!({"layout": "9.2x5.6"}));
+    assert_eq!(out["models"].as_u64(), Some(2), "{out}");
+    assert_eq!(images(&s), 0, "không raster");
+    let d = &s.doc().unwrap().doc;
+    let group = d.node(NodeId(out["groups"][0].as_u64().unwrap())).unwrap();
+    assert_eq!(group.children().unwrap().len(), 20);
+    for c in group.children().unwrap() {
+        let kids = c.children().unwrap();
+        let mask = kids[0].geometric_bounds().unwrap();
+        let (w, h) = (mask.width() / CM, mask.height() / CM);
+        assert!((w.max(h) - 9.2).abs() < 1e-3 && (w.min(h) - 5.6).abs() < 1e-3, "{w} × {h}");
+        // Bài đã dựng thẳng: lấp đúng khung clip (bài còn nghiêng thì khung thẳng của nó to hơn).
+        let art = kids[1].geometric_bounds().unwrap();
+        assert!((art.width() - mask.width()).abs() < 0.01 && (art.height() - mask.height()).abs() < 0.01, "{art:?} {mask:?}");
+    }
+}
+
+/// Sai khổ: tự sửa bằng clip đúng khổ ở tâm, giữ vector (DanCard raster ở bước này).
+#[test]
+fn dan_card_sai_kho_tu_clip_giu_vector() {
+    let mm = 72.0 / 25.4;
+    let (mut s, ids) = card_sources(1, 1);
+    let big = id_of(&run(&mut s, "shape.rectangle", json!({"x": 400.0 * mm, "y": 200.0 * mm, "width": 100.0 * mm, "height": 62.0 * mm})));
+    run(&mut s, "select.set", json!({"ids": [ids[0].0, big.0]}));
+    let out = run(&mut s, "dancard.layout", json!({"layout": "9.2x5.6"}));
+    assert_eq!(out["models"].as_u64(), Some(2), "{out}");
+    assert_eq!(images(&s), 0, "không raster");
+    let d = &s.doc().unwrap().doc;
+    for c in d.node(NodeId(out["groups"][0].as_u64().unwrap())).unwrap().children().unwrap() {
+        assert!(c.clips());
+        let b = c.children().unwrap()[0].geometric_bounds().unwrap();
+        assert!((b.width().max(b.height()) / mm - 92.0).abs() < 1e-3 && (b.width().min(b.height()) / mm - 56.0).abs() < 1e-3, "{b:?}");
+    }
+}
+
+/// Clip card trên card đặt nghiêng: mask theo khung transform (cùng góc, đúng 9,2 × 5,6).
+#[test]
+fn clip_card_theo_khung_transform() {
+    let (mut s, id) = card(25.0);
+    run(&mut s, "select.set", json!({"ids": [id.0]}));
+    let out = run(&mut s, "dancard.clipCard", json!({}));
+    let g = NodeId(out["ids"][0].as_u64().unwrap());
+    run(&mut s, "select.set", json!({"ids": [g.0]}));
+    let f = frame(&mut s);
+    assert!(close(&f["angle"], 25.0) && close(&f["width"], 9.2) && close(&f["height"], 5.6), "{f}");
+    // Clip kích thước mặc định cũng theo khung transform.
+    let (mut s, id) = card(25.0);
+    run(&mut s, "select.set", json!({"ids": [id.0]}));
+    let out = run(&mut s, "dancard.clipToSize", json!({"width": 9, "height": 5.4}));
+    run(&mut s, "select.set", json!({"ids": [out["ids"][0]]}));
+    let f = frame(&mut s);
+    assert!(close(&f["angle"], 25.0) && close(&f["width"], 9.0) && close(&f["height"], 5.4), "{f}");
+}
+
+/// Catalogue: trang nghiêng lẻ được dựng thẳng, giữ vector; trang ngang xoay 90° cho vừa cuốn dọc
+/// giữ đúng hướng đang thấy (như DanCard đo khung trang), không bị bóp méo.
+#[test]
+fn catalogue_dung_thang_trang_giu_vector() {
+    let mm = 72.0 / 25.4;
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 2000, "height": 1500, "colorMode": "cmyk"}));
+    let mut ids = vec![];
+    for i in 0..4 {
+        // Trang 1 thiết kế ngang 210 × 148, xoay 90° thành đứng; trang 3 đặt lệch 3°.
+        let (w, h) = if i == 1 { (210.0 * mm, 148.0 * mm) } else { (148.0 * mm, 210.0 * mm) };
+        let id = id_of(&run(&mut s, "shape.rectangle", json!({"x": 20.0 + i as f64 * 200.0, "y": 20, "width": w, "height": h})));
+        let turn = [0.0, 90.0, 0.0, 3.0][i];
+        if turn != 0.0 {
+            run(&mut s, "select.set", json!({"ids": [id.0]}));
+            run(&mut s, "object.rotate", json!({"angle": turn}));
+        }
+        ids.push(id.0);
+    }
+    run(&mut s, "select.set", json!({"ids": ids}));
+    run(&mut s, "dancard.catalogue", json!({"width": 14.8, "height": 21}));
+    assert_eq!(images(&s), 0, "không raster");
+    let d = &s.doc().unwrap().doc;
+    let mut turns = vec![];
+    for id in &ids {
+        let n = d.node(NodeId(*id)).unwrap();
+        let b = n.geometric_bounds().unwrap();
+        // Trang đứng (hoặc nằm khi cuốn xoay): cạnh dài 21 cm, cạnh ngắn 14,8 cm (ruột có thể bóp 0,25 mm).
+        let (long, short) = (b.width().max(b.height()) / mm, b.width().min(b.height()) / mm);
+        assert!((long - 210.0).abs() < 1.0 && (short - 148.0).abs() < 1.0, "{long} × {short}: không được bóp méo");
+        assert!(((n.bbox_angle / 90.0).round() * 90.0 - n.bbox_angle).abs() < 1e-6, "phần nghiêng lẻ đã bỏ: {}", n.bbox_angle);
+        turns.push(n.bbox_angle);
+    }
+    // Trang ngang đã xoay đứng giữ hướng đó: lệch 90° so với các trang khác.
+    assert!(((turns[1] - turns[0]).rem_euclid(180.0) - 90.0).abs() < 1e-6, "{turns:?}");
+    assert!((turns[2] - turns[0]).rem_euclid(180.0) < 1e-6 && (turns[3] - turns[0]).rem_euclid(180.0) < 1e-6, "{turns:?}");
+}
+
+/// Dựng thẳng chỉ bỏ phần nghiêng lẻ (-45°, 45°]: xoay đúng 90° trong app giữ hướng đang thấy; góc
+/// dò từ file .ai (không lưu góc) thì sau khi dựng thẳng, khung transform của object và mọi object
+/// con đều thẳng.
+#[test]
+fn dung_thang_chi_bo_phan_nghieng_le() {
+    let (s, id) = card(90.0);
+    assert!(super::upright_affine(&s.doc().unwrap().doc, id).is_none(), "xoay đúng 90°: không dựng lại");
+    let (s, id) = card(100.0);
+    let d = &s.doc().unwrap().doc;
+    let (_, tilt, detected) = super::upright_affine(d, id).unwrap();
+    assert!((tilt - 10.0).abs() < 1e-9 && !detected);
+    let up = super::upright_copy(d, id).unwrap();
+    assert!((up.bbox_angle - 90.0).abs() < 1e-12, "còn đúng 90°: {}", up.bbox_angle);
+    let b = up.geometric_bounds().unwrap();
+    assert!((b.width() / CM - 5.6).abs() < 1e-6 && (b.height() / CM - 9.2).abs() < 1e-6, "{b:?}");
+    // Group nghiêng 17° như file .ai: mọi góc lưu là 0, góc dò từ hình dạng.
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 800, "height": 600, "colorMode": "cmyk"}));
+    let a = id_of(&run(&mut s, "shape.rectangle", json!({"x": 100, "y": 100, "width": 9.2 * CM, "height": 5.6 * CM})));
+    let m = id_of(&run(&mut s, "shape.rectangle", json!({"x": 110, "y": 110, "width": 20, "height": 20})));
+    run(&mut s, "select.set", json!({"ids": [a.0, m.0]}));
+    let g = id_of(&run(&mut s, "object.group", json!({})));
+    run(&mut s, "select.set", json!({"ids": [g.0]}));
+    run(&mut s, "object.rotate", json!({"angle": 17}));
+    s.edit("quên góc", |d, _| {
+        fn zero(n: &mut vectorcraft_doc::Node) {
+            n.bbox_angle = 0.0;
+            for c in n.children_mut().into_iter().flatten() {
+                zero(std::sync::Arc::make_mut(c));
+            }
+        }
+        zero(d.node_mut(g).unwrap());
+        Ok(())
+    })
+    .unwrap();
+    let (_, tilt, detected) = super::upright_affine(&s.doc().unwrap().doc, g).unwrap();
+    assert!((tilt - 17.0).abs() < 1e-6 && detected, "{tilt}");
+    s.edit("dựng thẳng", |d, _| Ok(super::make_upright(d, g))).unwrap();
+    let n = s.doc().unwrap().doc.node(g).unwrap().clone();
+    let b = n.geometric_bounds().unwrap();
+    assert!((b.width() / CM - 9.2).abs() < 1e-6 && (b.height() / CM - 5.6).abs() < 1e-6, "nội dung đã thẳng: {b:?}");
+    assert_eq!(n.bbox_angle, 0.0);
+    assert!(n.children().unwrap().iter().all(|c| c.bbox_angle == 0.0), "object con không còn góc âm");
+}
+
+/// Clip và Resize theo khung transform: rộng × cao là ngang × dọc như đang thấy trên trang, kể cả
+/// khi card đã xoay 90° trong app (mask không cắt nhầm chiều).
+#[test]
+fn clip_resize_card_xoay_90_theo_huong_dang_thay() {
+    let (mut s, id) = card(90.0);
+    run(&mut s, "select.set", json!({"ids": [id.0]}));
+    let out = run(&mut s, "dancard.clipToSize", json!({"width": 5.6, "height": 9.2}));
+    let g = NodeId(out["ids"][0].as_u64().unwrap());
+    let d = &s.doc().unwrap().doc;
+    let mask = d.node(g).unwrap().children().unwrap()[0].geometric_bounds().unwrap();
+    assert!((mask.width() / CM - 5.6).abs() < 1e-6 && (mask.height() / CM - 9.2).abs() < 1e-6, "{mask:?}");
+    let card_b = d.node(id).unwrap().geometric_bounds().unwrap();
+    assert!((card_b.width() - mask.width()).abs() < 1e-6 && (card_b.height() - mask.height()).abs() < 1e-6, "mask phủ đúng card, không cắt");
+
+    let (mut s, id) = card(90.0);
+    run(&mut s, "select.set", json!({"ids": [id.0]}));
+    run(&mut s, "dancard.resize", json!({"width": 6, "height": 10}));
+    let b = s.doc().unwrap().doc.node(id).unwrap().geometric_bounds().unwrap();
+    assert!((b.width() / CM - 6.0).abs() < 1e-3 && (b.height() / CM - 10.0).abs() < 1e-3, "{b:?}");
+    // Xoay 100°: co giãn dọc trục card nghiêng 10°, vẫn nhập theo hướng đang thấy.
+    let (mut s, _) = card(100.0);
+    run(&mut s, "dancard.resize", json!({"width": 6, "height": 10}));
+    let f = frame(&mut s);
+    assert!(close(&f["angle"], 100.0) && close(&f["width"], 10.0) && close(&f["height"], 6.0), "{f}");
+}
+
+/// Card trắng: khổ lấy từ khung path không tô 92 × 56, chữ nhỏ lệch góc. Dàn card tự clip theo
+/// khung đó (DanCard raster thành ảnh đúng khung): không báo sai khổ, các bản đặt theo khung.
+#[test]
+fn dan_card_tu_sua_theo_khung_khong_to() {
+    let mm = 72.0 / 25.4;
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 330.0 * mm, "height": 480.0 * mm, "colorMode": "cmyk"}));
+    let (x, y) = (400.0 * mm, 0.0);
+    let frame_id = id_of(&run(&mut s, "shape.rectangle", json!({"x": x, "y": y, "width": 92.0 * mm, "height": 56.0 * mm})));
+    run(&mut s, "paint.setFill", json!({"none": true, "ids": [frame_id.0]}));
+    run(&mut s, "paint.setStroke", json!({"none": true, "ids": [frame_id.0]}));
+    let logo = id_of(&run(&mut s, "shape.rectangle", json!({"x": x + 5.0 * mm, "y": y + 5.0 * mm, "width": 30.0 * mm, "height": 15.0 * mm})));
+    run(&mut s, "paint.setFill", json!({"color": {"c": 0, "m": 1, "y": 1, "k": 0}, "ids": [logo.0]}));
+    run(&mut s, "select.set", json!({"ids": [frame_id.0, logo.0]}));
+    let card_id = id_of(&run(&mut s, "object.group", json!({})));
+    run(&mut s, "select.set", json!({"ids": [card_id.0]}));
+    let out = run(&mut s, "dancard.layout", json!({"layout": "9.2x5.6"}));
+    assert_eq!(images(&s), 0, "không raster");
+    let d = &s.doc().unwrap().doc;
+    let group = d.node(NodeId(out["groups"][0].as_u64().unwrap())).unwrap();
+    let ab = d.artboards[0].rect;
+    let mut masks = vec![];
+    for c in group.children().unwrap() {
+        assert!(c.clips());
+        let m = c.children().unwrap()[0].geometric_bounds().unwrap();
+        assert!((m.width().max(m.height()) / mm - 92.0).abs() < 1e-3 && (m.width().min(m.height()) / mm - 56.0).abs() < 1e-3, "{m:?}");
+        masks.push(m);
+    }
+    // Bản đặt theo khung card: các khung không chồng nhau và cả khối nằm giữa artboard.
+    for (i, a) in masks.iter().enumerate() {
+        for b in &masks[i + 1..] {
+            let ov = a.intersect(*b);
+            assert!(ov.width() <= 1e-6 || ov.height() <= 1e-6, "{a:?} chồng {b:?}");
+        }
+    }
+    let all = masks.iter().skip(1).fold(masks[0], |u, m| u.union(*m));
+    assert!((all.center() - ab.center()).hypot() < 1e-3, "khối khung card nằm giữa artboard: {all:?} / {ab:?}");
+}
+
+/// Một card thử: nền 92 × 56 mm tô hồng ở (`x`, `y`) và một thanh đen 42 × 10 mm tràn ra ngoài cạnh
+/// phải của nền 30 mm, gom thành group. Trả (group, nền, thanh).
+fn card_with_tail(s: &mut Session, x: f64, y: f64) -> (NodeId, NodeId, NodeId) {
+    let mm = 72.0 / 25.4;
+    let bg = id_of(&run(s, "shape.rectangle", json!({"x": x, "y": y, "width": 92.0 * mm, "height": 56.0 * mm})));
+    run(s, "paint.setFill", json!({"color": {"c": 0, "m": 0.2, "y": 0, "k": 0}, "ids": [bg.0]}));
+    run(s, "paint.setStroke", json!({"none": true, "ids": [bg.0]}));
+    let tail = id_of(&run(s, "shape.rectangle", json!({"x": x + 80.0 * mm, "y": y + 20.0, "width": 42.0 * mm, "height": 10.0 * mm})));
+    run(s, "paint.setFill", json!({"color": {"c": 0, "m": 0, "y": 0, "k": 1}, "ids": [tail.0]}));
+    run(s, "paint.setStroke", json!({"none": true, "ids": [tail.0]}));
+    run(s, "select.set", json!({"ids": [bg.0, tail.0]}));
+    let g = id_of(&run(s, "object.group", json!({})));
+    (g, bg, tail)
+}
+
+/// Khung mask của clip group `g` (clipping path là con đầu tiên).
+fn mask_of(s: &Session, g: NodeId) -> vectorcraft_geom::Rect {
+    s.doc().unwrap().doc.node(g).unwrap().children().unwrap()[0].geometric_bounds().unwrap()
+}
+
+/// Clip card như `_dcClipToSizeCore` của DanCard: card có nền đúng khổ (phần tràn ra ngoài) clip theo
+/// tâm nền; chọn object con của card đã clip thì lấy clip cha (đúng khổ thì giữ, khổ khác thì clip lại
+/// cả clip group theo tâm mask); hai object con của cùng một card chỉ clip một lần.
+#[test]
+fn clip_card_neo_theo_nen_va_clip_cha() {
+    let mm = 72.0 / 25.4;
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 1200, "height": 800, "colorMode": "cmyk"}));
+    let (g, bg, tail) = card_with_tail(&mut s, 100.0, 100.0);
+    run(&mut s, "select.set", json!({"ids": [g.0]}));
+    let out = run(&mut s, "dancard.clipCard", json!({}));
+    assert!(out["message"].as_str().unwrap().contains("dùng chung logic Clip"), "{out}");
+    let clip = NodeId(out["ids"][0].as_u64().unwrap());
+    let bgb = s.doc().unwrap().doc.node(bg).unwrap().geometric_bounds().unwrap();
+    let m = mask_of(&s, clip);
+    assert!((m.center() - bgb.center()).hypot() < 1e-6, "tâm mask là tâm nền, không lệch theo phần tràn: {m:?} / {bgb:?}");
+    assert!((m.width() / mm - 92.0).abs() < 1e-6 && (m.height() / mm - 56.0).abs() < 1e-6, "{m:?}");
+    // Chọn object con: clip cha đã đúng khổ thì giữ nguyên, không lồng thêm.
+    run(&mut s, "select.set", json!({"ids": [tail.0]}));
+    let out = run(&mut s, "dancard.clipCard", json!({}));
+    assert_eq!(out["ids"], json!([clip.0]), "{out}");
+    // Khổ khác: clip lại cả clip group, tâm là tâm mask cũ; hai object con chỉ một lần.
+    run(&mut s, "select.set", json!({"ids": [bg.0, tail.0]}));
+    let out = run(&mut s, "dancard.clipCard", json!({"width": 9, "height": 5.5}));
+    let ids = out["ids"].as_array().unwrap();
+    assert_eq!(ids.len(), 1, "{out}");
+    let outer = NodeId(ids[0].as_u64().unwrap());
+    assert_ne!(outer, clip);
+    let d = &s.doc().unwrap().doc;
+    assert_eq!(d.node(outer).unwrap().children().unwrap()[1].id, clip, "clip group cũ nằm trong clip group mới");
+    let m2 = mask_of(&s, outer);
+    assert!((m2.center() - m.center()).hypot() < 1e-6 && (m2.width() / mm - 90.0).abs() < 1e-6 && (m2.height() / mm - 55.0).abs() < 1e-6, "{m2:?}");
+}
+
+/// Clip card trên card đặt nghiêng 10° (xoay trong app): mask nghiêng theo trục card, đúng khổ, tâm là
+/// tâm nền; card xoay đứng 90° thì khung đứng 5,6 × 9,2 như đang thấy.
+#[test]
+fn clip_card_nghieng_va_dung_theo_huong_dang_thay() {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 1200, "height": 800, "colorMode": "cmyk"}));
+    let (g, bg, _) = card_with_tail(&mut s, 100.0, 100.0);
+    run(&mut s, "select.set", json!({"ids": [g.0]}));
+    run(&mut s, "object.rotate", json!({"angle": 10}));
+    let out = run(&mut s, "dancard.clipCard", json!({}));
+    let clip = NodeId(out["ids"][0].as_u64().unwrap());
+    run(&mut s, "select.set", json!({"ids": [clip.0]}));
+    let f = frame(&mut s);
+    assert!(close(&f["angle"], 10.0) && close(&f["width"], 9.2) && close(&f["height"], 5.6), "{f}");
+    let bgc = s.doc().unwrap().doc.node(bg).unwrap().geometric_bounds().unwrap().center();
+    let mc = mask_of(&s, clip).center();
+    assert!((mc - bgc).hypot() < 1e-6, "{mc:?} / {bgc:?}");
+    // Card xoay đứng: khung đứng như đang thấy trên trang.
+    let (mut s, id) = card(90.0);
+    run(&mut s, "select.set", json!({"ids": [id.0]}));
+    let out = run(&mut s, "dancard.clipCard", json!({}));
+    let m = mask_of(&s, NodeId(out["ids"][0].as_u64().unwrap()));
+    assert!((m.width() / CM - 5.6).abs() < 1e-6 && (m.height() / CM - 9.2).abs() < 1e-6, "{m:?}");
+}
+
+/// Nút Clip như DanCard: tâm mask là tâm phần nhìn thấy, kể cả khi card đặt nghiêng và có object ẩn
+/// lòi ra một bên (khung transform tính cả object ẩn); xong thì Expand Appearance.
+#[test]
+fn clip_theo_tam_phan_nhin_thay_va_expand() {
+    let mm = 72.0 / 25.4;
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 1200, "height": 800, "colorMode": "cmyk"}));
+    let bg = id_of(&run(&mut s, "shape.rectangle", json!({"x": 100, "y": 100, "width": 92.0 * mm, "height": 56.0 * mm})));
+    run(&mut s, "paint.setFill", json!({"color": {"c": 0, "m": 0.2, "y": 0, "k": 0}, "ids": [bg.0]}));
+    let hidden = id_of(&run(&mut s, "shape.rectangle", json!({"x": 100.0 + 92.0 * mm, "y": 100, "width": 40.0 * mm, "height": 56.0 * mm})));
+    run(&mut s, "select.set", json!({"ids": [bg.0, hidden.0]}));
+    let g = id_of(&run(&mut s, "object.group", json!({})));
+    run(&mut s, "select.set", json!({"ids": [hidden.0]}));
+    run(&mut s, "object.hide", json!({}));
+    run(&mut s, "select.set", json!({"ids": [g.0]}));
+    run(&mut s, "object.rotate", json!({"angle": 12}));
+    let out = run(&mut s, "dancard.clipToSize", json!({"width": 9.2, "height": 5.6}));
+    let clip = NodeId(out["ids"][0].as_u64().unwrap());
+    let bgc = s.doc().unwrap().doc.node(bg).unwrap().geometric_bounds().unwrap().center();
+    let mc = mask_of(&s, clip).center();
+    assert!((mc - bgc).hypot() < 1e-6, "tâm phần nhìn thấy, không theo khung có object ẩn: {mc:?} / {bgc:?}");
+    run(&mut s, "select.set", json!({"ids": [clip.0]}));
+    let f = frame(&mut s);
+    assert!(close(&f["angle"], 12.0) && close(&f["width"], 9.2) && close(&f["height"], 5.6), "{f}");
+    // Expand Appearance như DanCard: hiệu ứng Offset Path thành hình thật.
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 600, "height": 600, "colorMode": "cmyk"}));
+    let r = id_of(&run(&mut s, "shape.rectangle", json!({"x": 100, "y": 100, "width": 100, "height": 60})));
+    run(&mut s, "paint.setStroke", json!({"none": true}));
+    run(&mut s, "effect.apply", json!({"effect": "path.offsetPath", "params": {"offset": 10}}));
+    run(&mut s, "select.set", json!({"ids": [r.0]}));
+    run(&mut s, "dancard.clipToSize", json!({"width": 5, "height": 3}));
+    let n = s.doc().unwrap().doc.node(r).unwrap().clone();
+    assert!(n.appearance.effects.is_empty(), "đã Expand Appearance");
+    assert!((n.geometric_bounds().unwrap().width() - 120.0).abs() < 0.1, "{:?}", n.geometric_bounds());
+}
+
+/// Dựng thẳng một group có góc dò từ hình dạng (Node::group không lưu góc) mà các object con đã xoay
+/// trong app (góc đã lưu): khung của các object con đi theo phép xoay về thẳng, không giữ góc cũ.
+#[test]
+fn dung_thang_group_do_goc_giu_dung_khung_con() {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 800, "height": 600, "colorMode": "cmyk"}));
+    let a = id_of(&run(&mut s, "shape.rectangle", json!({"x": 100, "y": 100, "width": 9.2 * CM, "height": 5.6 * CM})));
+    // Object nhỏ ở giữa card: xoay cùng card vẫn nằm trong card.
+    let b = id_of(&run(&mut s, "shape.rectangle", json!({"x": 210, "y": 170, "width": 40, "height": 20})));
+    run(&mut s, "select.set", json!({"ids": [a.0, b.0]}));
+    run(&mut s, "object.rotate", json!({"angle": 10}));
+    let g = id_of(&run(&mut s, "object.group", json!({})));
+    let d = &s.doc().unwrap().doc;
+    assert_eq!(d.node(g).unwrap().bbox_angle, 0.0, "group mới không lưu góc");
+    assert!((d.node(a).unwrap().bbox_angle - 10.0).abs() < 1e-9);
+    let (_, tilt, detected) = super::upright_affine(d, g).unwrap();
+    assert!((tilt - 10.0).abs() < 1e-6 && detected, "{tilt}");
+    s.edit("dựng thẳng", |d, _| Ok(super::make_upright(d, g))).unwrap();
+    let d = &s.doc().unwrap().doc;
+    for id in [g, a, b] {
+        assert_eq!(d.node(id).unwrap().bbox_angle, 0.0, "{id:?}: khung thẳng như nội dung");
+    }
+    let ab = d.node(a).unwrap().geometric_bounds().unwrap();
+    assert!((ab.width() / CM - 9.2).abs() < 1e-6 && (ab.height() / CM - 5.6).abs() < 1e-6, "{ab:?}");
+}

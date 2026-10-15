@@ -3,14 +3,17 @@
 //! `dcLuuDanTheoMauPDF_SelectedLegacy` và `dcCopyToiUuNoteToArtboards` của DanCard.
 //!
 //! Mẫu đã học không ghi ra file tạm như DanCard: `dancard.learnTemplate` trả mẫu dạng JSON, panel
-//! giữ nó và đưa lại cho `dancard.applyTemplate`. Mỗi object cấp đầu được chọn là một vị trí: độ
-//! lệch tâm so với tâm cả bố cục, khung rộng × cao và góc (bội số 90°) so với con chuẩn, là con mẫu
-//! cùng chiều với các con nguồn. Góc đọc từ ma trận ảnh và chữ trong card khi mọi vị trí đều có;
-//! còn lại so ảnh 128 × 128 của từng vị trí với con chuẩn xoay 0/90/180/270°, như DanCard so ảnh
-//! preview (chỉ nét đậm được tính).
+//! giữ nó và đưa lại cho `dancard.applyTemplate`. Mỗi object cấp đầu được chọn là một vị trí, đo
+//! theo khung transform của nó (DanCard chỉ có khung thẳng của trang): độ lệch tâm so với tâm cả
+//! bố cục, khung rộng × cao theo trục của khung, góc nghiêng của khung (`tilt`) và hướng artwork
+//! (bội số 90°) so với con chuẩn, là con mẫu cùng chiều với các con nguồn. Hướng artwork đọc trên
+//! bản đã dựng thẳng: từ ma trận ảnh và chữ trong card khi mọi vị trí đều có; còn lại so ảnh
+//! 128 × 128 của từng vị trí với con chuẩn xoay 0/90/180/270°, như DanCard so ảnh preview (chỉ nét
+//! đậm được tính).
 //!
-//! Áp mẫu: mỗi nguồn được raster 500 ppi (ảnh thì giữ nguyên), xoay và co giãn đúng khung từng vị
-//! trí (không giữ tỉ lệ), mỗi lô một artboard mới đúng khổ file pon, artwork của pon chép lên trên.
+//! Áp mẫu: mỗi nguồn được dựng thẳng theo khung transform và giữ nguyên vector (DanCard raster
+//! 500 ppi), xoay theo hướng artwork, co giãn đúng khung từng vị trí (không giữ tỉ lệ), nghiêng theo
+//! khung vị trí; mỗi lô một artboard mới đúng khổ file pon, artwork của pon chép lên trên.
 //! Mẫu 2 mặt: mặt sau là mặt trước đối xứng ngang, nguồn cột trái là mặt trước, cột phải là mặt sau.
 //! Các tờ mới xếp từ góc trên trái canvas (± 7200 pt quanh gốc toạ độ), cách nhau 10 mm.
 //!
@@ -20,13 +23,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use vectorcraft_doc::{Artboard, Document, Node, NodeId, NodeKind, RasterEffectsSettings, Scaling, TextKind};
+use vectorcraft_doc::{Artboard, Document, Node, NodeId, NodeKind, Scaling, TextKind};
 use vectorcraft_geom::{Affine, PathData, Point, Rect, Vec2};
 use vectorcraft_render::RenderOptions;
-use vectorcraft_render::encode::{RasterExportOptions, RasterFormat};
 
-use super::raster::{Fit, image_node, render_raster};
-use super::roots_in_paint_order;
+use super::{roots_in_paint_order, upright_affine, upright_copy};
 use crate::cmd::*;
 use crate::{EngineError, Result, Session};
 
@@ -38,7 +39,6 @@ const HALF: f64 = 7200.0;
 const EPS: f64 = 0.01;
 /// Sai lệch kích thước chấp nhận sau khi co giãn (pt).
 const SIZE_TOL: f64 = 0.75;
-const PPI: f64 = 500.0;
 /// Cạnh ảnh dùng để so hướng (pixel).
 const N: usize = 128;
 /// Layer chứa kết quả Áp mẫu (như DanCard).
@@ -68,7 +68,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             "DanCard: Áp mẫu",
             [],
             None,
-            "{template: mẫu dancard.learnTemplate trả về, multiSourcePerArtboard?: bool (Dàn nhiều mẫu nguồn khác nhau vào 1 artboard: các nguồn lần lượt vào các vị trí, thiếu thì bù bằng con cuối rồi gần cuối; mặc định false: mỗi nguồn một artboard), ponFront: file pon (.ai/.pdf/.svg/.vectorcraft; artboard đầu là khổ tờ, artwork chép lên mỗi tờ), ponBack?: file pon MẶT SAU (mẫu 2 mặt)} dàn các con nguồn đang chọn theo mẫu (2 mặt: cột trái = mặt trước, cột phải = mặt sau): mỗi nguồn raster 500 ppi, xoay và co giãn đúng khung từng vị trí, mỗi lô một artboard mới trên layer __DAN_THEO_MAU_KET_QUA__; dàn không lỗi thì xoá các artboard cũ; một bước hoàn tác → {message, sheets, firstArtboard, ids, notes}",
+            "{template: mẫu dancard.learnTemplate trả về, multiSourcePerArtboard?: bool (Dàn nhiều mẫu nguồn khác nhau vào 1 artboard: các nguồn lần lượt vào các vị trí, thiếu thì bù bằng con cuối rồi gần cuối; mặc định false: mỗi nguồn một artboard), ponFront: file pon (.ai/.pdf/.svg/.vectorcraft; artboard đầu là khổ tờ, artwork chép lên mỗi tờ), ponBack?: file pon MẶT SAU (mẫu 2 mặt)} dàn các con nguồn đang chọn theo mẫu (2 mặt: cột trái = mặt trước, cột phải = mặt sau): mỗi nguồn dựng thẳng theo khung transform (giữ vector), xoay, co giãn đúng khung và nghiêng theo từng vị trí, mỗi lô một artboard mới trên layer __DAN_THEO_MAU_KET_QUA__; dàn không lỗi thì xoá các artboard cũ; một bước hoàn tác → {message, sheets, firstArtboard, ids, notes}",
             has_selection,
             apply_template
         ),
@@ -155,8 +155,9 @@ fn other(msg: impl Into<String>) -> EngineError {
 
 // ---------------------------------------------------------------- mẫu
 
-/// Một vị trí của mẫu: độ lệch tâm so với tâm bố cục và khung (pt, y hướng xuống), góc (độ, ngược
-/// chiều kim đồng hồ) xoay con nguồn cùng chiều con chuẩn thành chiều của vị trí; -1: chưa biết.
+/// Một vị trí của mẫu: độ lệch tâm so với tâm bố cục và khung (pt, y hướng xuống; rộng × cao theo
+/// trục của khung), góc (độ, ngược chiều kim đồng hồ, bội số 90°) xoay con nguồn cùng chiều con
+/// chuẩn thành hướng artwork của vị trí (-1: chưa biết), rồi góc nghiêng `tilt` của khung vị trí.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Slot {
     pub dx: f64,
@@ -164,19 +165,32 @@ pub(super) struct Slot {
     pub w: f64,
     pub h: f64,
     pub angle: f64,
+    pub tilt: f64,
 }
 
 impl Slot {
-    fn of(frame: Rect, centre: Point, angle: f64) -> Self {
+    /// `frame`: khung đã dựng thẳng (tâm là tâm khung transform), `tilt`: góc của khung transform.
+    fn of(frame: Rect, centre: Point, angle: f64, tilt: f64) -> Self {
         let c = frame.center();
-        Slot { dx: c.x - centre.x, dy: c.y - centre.y, w: frame.width(), h: frame.height(), angle }
+        Slot { dx: c.x - centre.x, dy: c.y - centre.y, w: frame.width(), h: frame.height(), angle, tilt }
     }
 
-    /// Vị trí mặt sau, đối xứng ngang qua trục dọc giữa bố cục: 0°/180° giữ nguyên, 90°/270° đổi chiều.
+    /// Vị trí mặt sau, đối xứng ngang qua trục dọc giữa bố cục: 0°/180° giữ nguyên, 90°/270° đổi
+    /// chiều, khung nghiêng ngược lại.
     pub(super) fn mirrored(self) -> Self {
         let angle = if self.angle < 0.0 { self.angle } else { (-self.angle).rem_euclid(360.0) };
-        Slot { dx: -self.dx, angle, ..self }
+        Slot { dx: -self.dx, angle, tilt: -self.tilt, ..self }
     }
+}
+
+/// Khung thẳng `r` nghiêng `tilt` độ quanh tâm: hộp thẳng ôm nó trên trang.
+fn footprint(r: Rect, tilt: f64) -> Rect {
+    if tilt == 0.0 || !tilt.is_finite() {
+        return r;
+    }
+    let m = Affine::rotate_about(-tilt.to_radians(), r.center());
+    let pts = [Point::new(r.x0, r.y0), Point::new(r.x1, r.y0), Point::new(r.x1, r.y1), Point::new(r.x0, r.y1)].map(|p| m * p);
+    pts.iter().skip(1).fold(Rect::from_points(pts[0], pts[0]), |acc, p| acc.union_pt(*p))
 }
 
 /// Mẫu đọc từ JSON của `dancard.learnTemplate`.
@@ -187,8 +201,11 @@ struct Template {
 }
 
 fn template_json(two: bool, state: &str, reference: Option<usize>, slots: &[Slot], kinds: &[&str]) -> Value {
-    let list: Vec<Value> =
-        slots.iter().zip(kinds).map(|(s, k)| json!({"dx": s.dx, "dy": s.dy, "w": s.w, "h": s.h, "angle": s.angle, "kind": k})).collect();
+    let list: Vec<Value> = slots
+        .iter()
+        .zip(kinds)
+        .map(|(s, k)| json!({"dx": s.dx, "dy": s.dy, "w": s.w, "h": s.h, "angle": s.angle, "tilt": s.tilt, "kind": k}))
+        .collect();
     json!({
         "format": FORMAT,
         "version": VERSION,
@@ -232,6 +249,8 @@ fn parse_template(v: Option<&Value>) -> Result<Template> {
             w: num(s, "w"),
             h: num(s, "h"),
             angle: s.get("angle").and_then(Value::as_f64).unwrap_or(-1.0),
+            // Mẫu học trước khi có góc nghiêng: khung thẳng.
+            tilt: s.get("tilt").map_or(Some(0.0), Value::as_f64).unwrap_or(f64::NAN),
         })
         .collect();
     Ok(Template { two, back_mirror: t.get("backMirror").and_then(Value::as_bool).unwrap_or(false), slots })
@@ -240,7 +259,7 @@ fn parse_template(v: Option<&Value>) -> Result<Template> {
 /// `validateLearnedBlock`: mỗi vị trí cần độ lệch, góc hữu hạn và khung dương.
 fn validate(slots: &[Slot], label: &str) -> Result<()> {
     for (i, s) in slots.iter().enumerate() {
-        let finite = [s.dx, s.dy, s.angle, s.w, s.h].iter().all(|v| v.is_finite());
+        let finite = [s.dx, s.dy, s.angle, s.tilt, s.w, s.h].iter().all(|v| v.is_finite());
         if !(finite && s.w > 0.0 && s.h > 0.0) {
             return Err(other(format!("Mẫu {label} có dữ liệu không hợp lệ ở vị trí {}. Hãy Học mẫu lại.", i + 1)));
         }
@@ -250,10 +269,15 @@ fn validate(slots: &[Slot], label: &str) -> Result<()> {
 
 // ---------------------------------------------------------------- dancard.learnTemplate
 
-/// Một con mẫu đã đo.
+/// Một con mẫu đã đo: bản dựng thẳng theo khung transform (`node`) và khung vị trí của bản đó
+/// (`seen`, để so ảnh với `node`), khung đó đặt về đúng tâm phần nhìn thấy trên trang (`frame`), góc
+/// nghiêng của khung transform.
 struct Item {
     id: NodeId,
+    node: Node,
+    seen: Rect,
     frame: Rect,
+    tilt: f64,
     kind: &'static str,
 }
 
@@ -281,18 +305,26 @@ fn learn_template(s: &mut Session, p: &Value) -> Result<Value> {
     let items: Vec<Item> = ids
         .iter()
         .filter_map(|id| {
-            let n = d.node(*id)?;
-            Some(Item { id: *id, frame: slot_frame(n)?, kind: kind_of(n) })
+            let kind = kind_of(d.node(*id)?);
+            let node = upright_copy(d, *id)?;
+            let seen = slot_frame(&node)?;
+            // Dựng thẳng xoay quanh tâm khung transform; khung vị trí đo trên bản đã dựng thẳng có thể
+            // lệch tâm đó (con ẩn, path không tô). Đưa tâm khung vị trí về đúng chỗ của nó trên trang
+            // để lúc áp mẫu, xoay nghiêng quanh tâm khung vị trí đặt đúng chỗ bản gốc.
+            let (up, tilt) = upright_affine(d, *id).map_or((Affine::IDENTITY, 0.0), |(m, t, _)| (m, t));
+            let c = seen.center();
+            let frame = seen + ((up.inverse() * c) - c);
+            Some(Item { id: *id, node, seen, frame, tilt, kind })
         })
         .collect();
-    let Some(union) = super::layout::union_of(items.iter().map(|it| it.frame)) else {
+    let Some(union) = super::layout::union_of(items.iter().map(|it| footprint(it.frame, it.tilt))) else {
         return Err(other("Không đo được bản mẫu nào."));
     };
     let centre = union.center();
     let measured: Vec<u64> = items.iter().map(|it| it.id.0).collect();
     let kinds: Vec<&str> = items.iter().map(|it| it.kind).collect();
     let Some(r) = reference else {
-        let slots: Vec<Slot> = items.iter().map(|it| Slot::of(it.frame, centre, -1.0)).collect();
+        let slots: Vec<Slot> = items.iter().map(|it| Slot::of(it.frame, centre, -1.0, it.tilt)).collect();
         return Ok(json!({
             "message": "Chọn 1 con mẫu cùng chiều nguồn → Xác nhận con chuẩn.",
             "pending": true,
@@ -302,7 +334,7 @@ fn learn_template(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let ref_index = reference_index(d, r, &items)?;
     let (angles, source) = infer_angles(d, &items, ref_index)?;
-    let slots: Vec<Slot> = items.iter().zip(&angles).map(|(it, a)| Slot::of(it.frame, centre, *a)).collect();
+    let slots: Vec<Slot> = items.iter().zip(&angles).map(|(it, a)| Slot::of(it.frame, centre, *a, it.tilt)).collect();
     let n = slots.len();
     let message = if two {
         format!(
@@ -350,13 +382,10 @@ fn reference_index(d: &Document, r: NodeId, items: &[Item]) -> Result<usize> {
     Ok(i)
 }
 
-/// Góc của từng vị trí so với con chuẩn (0, 90, 180, 270): từ ma trận ảnh/chữ khi mọi vị trí đều
-/// đọc được ("geometry"), không thì so ảnh ("render").
+/// Hướng artwork của từng vị trí so với con chuẩn (0, 90, 180, 270), đọc trên các bản đã dựng
+/// thẳng: từ ma trận ảnh/chữ khi mọi vị trí đều đọc được ("geometry"), không thì so ảnh ("render").
 fn infer_angles(d: &Document, items: &[Item], reference: usize) -> Result<(Vec<f64>, &'static str)> {
-    let nodes: Vec<&Node> = items.iter().filter_map(|it| d.node(it.id)).collect();
-    if nodes.len() != items.len() {
-        return Err(other("Không tìm thấy object mẫu."));
-    }
+    let nodes: Vec<&Node> = items.iter().map(|it| &it.node).collect();
     let quarters: Option<Vec<i64>> = nodes.iter().copied().map(content_quarter).collect();
     if let Some(q) = quarters
         && let Some(q0) = q.get(reference).copied()
@@ -364,7 +393,8 @@ fn infer_angles(d: &Document, items: &[Item], reference: usize) -> Result<(Vec<f
         return Ok((q.iter().map(|qi| ((qi - q0).rem_euclid(4) * 90) as f64).collect(), "geometry"));
     }
     let mut renderer = vectorcraft_render::Renderer::new();
-    let signals: Vec<Vec<f32>> = nodes.iter().zip(items).map(|(n, it)| signal(&mut renderer, d, n, it.frame)).collect();
+    // Ảnh của bản dựng thẳng trong khung đo trên chính bản đó (khung đã đặt về trang có thể lệch).
+    let signals: Vec<Vec<f32>> = nodes.iter().zip(items).map(|(n, it)| signal(&mut renderer, d, n, it.seen)).collect();
     let base = signals.get(reference).ok_or_else(|| other("Con mẫu chuẩn không khớp dữ liệu preview tổng."))?;
     let turned: Vec<Vec<f32>> = (0..4).map(|k| rotate_signal(base, k)).collect();
     let angles = signals
@@ -696,7 +726,7 @@ struct Job<'a> {
     tag: usize,
 }
 
-/// Lần dàn đang chạy: layer kết quả, ảnh phẳng theo nguồn, các bản đã đặt, lưu ý.
+/// Lần dàn đang chạy: layer kết quả, bản dựng thẳng theo nguồn, các bản đã đặt, lưu ý.
 struct Output {
     layer: NodeId,
     cache: HashMap<NodeId, Option<Node>>,
@@ -736,39 +766,21 @@ fn clear_previous_output(d: &mut Document, layer: NodeId, keep: &[NodeId]) -> Re
     Ok(())
 }
 
-/// Nguồn làm phẳng: ảnh giữ nguyên, còn lại raster 500 ppi đúng khung (nền trong suốt).
-fn flatten_source(d: &mut Document, src: NodeId) -> std::result::Result<Node, String> {
-    let mut n = d.node(src).cloned().ok_or("Không tìm thấy object nguồn.")?;
-    let frame = bnd(&n).ok_or("Không đo được biên dạng object.")?;
+/// Nguồn đã dựng thẳng theo khung transform, giữ nguyên vector (DanCard raster 500 ppi đúng khung).
+fn prepare_source(d: &Document, src: NodeId) -> std::result::Result<Node, String> {
+    let mut n = upright_copy(d, src).ok_or("Không tìm thấy object nguồn.")?;
+    bnd(&n).ok_or("Không đo được biên dạng object.")?;
     n.visible = true;
     n.locked = false;
-    if matches!(n.kind, NodeKind::Image(_)) {
-        return Ok(n);
-    }
-    let opts = RasterExportOptions { ppi: PPI, background: None, anti_alias: vectorcraft_render::AntiAlias::Art, ..Default::default() };
-    let inks = d.color_mode == vectorcraft_doc::ColorMode::Cmyk;
-    let name = n.name.clone();
-    let r = render_raster(
-        d,
-        vec![n],
-        frame,
-        Affine::IDENTITY,
-        PPI,
-        Fit::Exact,
-        &opts.render_options(RasterFormat::Png),
-        &RasterEffectsSettings::default(),
-        inks,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(image_node(d, r, name, 0.0))
+    Ok(n)
 }
 
-/// Ảnh phẳng của nguồn `src`, làm một lần cho cả lần dàn.
+/// Bản dựng thẳng của nguồn `src`, làm một lần cho cả lần dàn.
 fn flat_of(d: &mut Document, out: &mut Output, src: NodeId, tag: usize, no: usize) -> Option<Node> {
     if let Some(hit) = out.cache.get(&src) {
         return hit.clone();
     }
-    let flat = match flatten_source(d, src) {
+    let flat = match prepare_source(d, src) {
         Ok(n) => Some(n),
         Err(e) => {
             out.errors.push(format!("Mẫu {tag}, nguồn {no}: {e}"));
@@ -791,7 +803,8 @@ fn resize_to(n: &mut Node, w: f64, h: f64, sc: Scaling, missing: &str) -> std::r
     Ok(())
 }
 
-/// Đặt bản `n` vào vị trí `slot` của tờ có tâm `centre`: xoay theo góc vị trí, co giãn đúng khung, đặt tâm.
+/// Đặt bản `n` vào vị trí `slot` của tờ có tâm `centre`: xoay theo hướng artwork, co giãn đúng
+/// khung, đặt tâm, rồi nghiêng theo khung vị trí.
 fn place(mut n: Node, slot: Slot, centre: Point) -> std::result::Result<Node, String> {
     let sc = Scaling { patterns: true, ..Scaling::default() };
     let rot = if slot.angle >= 0.0 {
@@ -819,6 +832,9 @@ fn place(mut n: Node, slot: Slot, centre: Point) -> std::result::Result<Node, St
     }
     let target = Point::new(centre.x + slot.dx, centre.y + slot.dy);
     n.transform(Affine::translate(target - b.center()), sc);
+    if slot.tilt.is_finite() && slot.tilt.abs() > 1e-9 {
+        n.transform(Affine::rotate_about(-slot.tilt.to_radians(), target), sc);
+    }
     Ok(n)
 }
 
@@ -834,7 +850,7 @@ fn fill_sheet(d: &mut Document, out: &mut Output, job: &Job, art: Option<&Node>,
     for (i, (src, slot)) in job.sources.iter().zip(job.slots).enumerate() {
         let no = i + 1;
         let Some(flat) = flat_of(d, out, *src, tag, no) else {
-            out.errors.push(format!("Mẫu {tag}, vị trí {no}: không raster được nguồn cho slot này."));
+            out.errors.push(format!("Mẫu {tag}, vị trí {no}: không chuẩn bị được nguồn cho slot này."));
             continue;
         };
         let copy = d.reid(&flat);

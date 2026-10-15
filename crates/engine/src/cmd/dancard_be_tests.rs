@@ -317,14 +317,14 @@ fn dan_be_mot_mat_qua_session() {
     let layers_before = s.doc().unwrap().doc.layers.len();
     let r = run(&mut s, "dancard.dieLayout", json!({"paperW": "12", "paperH": "10", "ponClear": "7,5", "gap": ""}));
     assert_eq!(r["count"], 3, "{r}");
-    assert!(r["message"].as_str().unwrap().starts_with("OK: 3 con / tờ\nDàn silhouette thật: 3 con"), "{r}");
+    assert!(r["message"].as_str().unwrap().starts_with("OK:[[COUNT:3]] Dàn silhouette thật: 3 con"), "{r}");
     let d = &s.doc().unwrap().doc;
-    // Artboard cũ bị xoá; tờ mới bên phải mọi thứ đang có.
+    // Artboard cũ bị xoá; tờ mới ở góc trên trái canvas, cách mép 10 mm (như DanCard).
     assert_eq!(d.artboards.len(), 1);
     assert_eq!(d.artboards[0].name, "Dan be");
     let ab = d.artboards[0].rect;
     assert!((ab.width() - 120.0 * MM).abs() < 1e-9 && (ab.height() - 100.0 * MM).abs() < 1e-9, "{ab:?}");
-    assert!(ab.x0 >= 800.0 + 10.0 * MM - 1e-9, "{ab:?}");
+    assert!((ab.x0 - (-7200.0 + 10.0 * MM)).abs() < 1e-9 && (ab.y0 - (-7200.0 + 10.0 * MM)).abs() < 1e-9, "{ab:?}");
     // Khuôn dưới cùng, PON trên cùng, mỗi layer có dấu nhận biết.
     assert_eq!(d.layers.len(), layers_before + 3);
     assert_eq!(d.layers.first().unwrap().name.as_deref(), Some("Dàn bế - Khuôn"));
@@ -468,4 +468,95 @@ fn dan_be_bao_loi_nhu_dancard() {
         id_of(&run(&mut s, "path.create", json!({"anchors": [{"x": 50, "y": 90}, {"x": 150, "y": 90}, {"x": 150, "y": 110}], "closed": false})));
     run(&mut s, "select.set", json!({"ids": [open.0, b.0]}));
     assert_eq!(err(&mut s, json!({})), "Khuôn bế phải là path khép kín; không dùng khung bao thay thế.");
+}
+
+/// Khuôn và bài đặt nghiêng 12° (xoay trong app): dựng thẳng theo khung transform rồi mới xếp, nên
+/// ra đúng bố cục của khuôn thẳng (3 khuôn xoay 90°, 30 × 50 mm, bài 20 × 40 nằm giữa khuôn).
+#[test]
+fn dan_be_khuon_nghieng_dung_thang_theo_transform() {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 800, "height": 600, "colorMode": "cmyk"}));
+    let die = rect_at(&mut s, 120.0, 100.0, 50.0, 30.0);
+    let art = rect_at(&mut s, 360.0, 98.0, 40.0, 20.0);
+    run(&mut s, "select.set", json!({"ids": [die.0, art.0]}));
+    run(&mut s, "object.transformEach", json!({"rotate": 12}));
+    for id in [die, art] {
+        assert!((s.doc().unwrap().doc.node(id).unwrap().bbox_angle - 12.0).abs() < 1e-9);
+    }
+    run(&mut s, "select.set", json!({"ids": [die.0, art.0]}));
+    let r = run(&mut s, "dancard.dieLayout", json!({"paperW": "12", "paperH": "10", "ponClear": "7,5"}));
+    assert_eq!(r["count"], 3, "{r}");
+    let d = &s.doc().unwrap().doc;
+    let cuts = kids(layer_named(d, "Dàn bế - Khuôn"));
+    let arts = kids(layer_named(d, "Dàn bế - Bài"));
+    assert_eq!((cuts.len(), arts.len()), (3, 3));
+    for c in &cuts {
+        let b = c.geometric_bounds().unwrap();
+        assert!((b.width() - 30.0 * MM).abs() < 1e-6 && (b.height() - 50.0 * MM).abs() < 1e-6, "khuôn phải thẳng: {b:?}");
+    }
+    for a in &arts {
+        let b = a.geometric_bounds().unwrap();
+        assert!((b.width() - 20.0 * MM).abs() < 1e-6 && (b.height() - 40.0 * MM).abs() < 1e-6, "bài phải thẳng theo khuôn: {b:?}");
+        assert!(cuts.iter().any(|c| (c.geometric_bounds().unwrap().center() - b.center()).hypot() < 1e-6), "bài không nằm giữa khuôn");
+    }
+}
+
+/// Khuôn và bài nghiêng 12° trong file .ai (không lưu góc, góc dò từ hình dạng): dựng thẳng như khuôn
+/// xoay trong app, và khung transform của các bản sao đúng hướng dàn (0/90/180/270°), không còn
+/// lệch −12°.
+#[test]
+fn dan_be_khuon_nghieng_do_tu_file_ai_khung_dung_huong() {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 800, "height": 600, "colorMode": "cmyk"}));
+    let die = rect_at(&mut s, 120.0, 100.0, 50.0, 30.0);
+    let art = rect_at(&mut s, 360.0, 98.0, 40.0, 20.0);
+    run(&mut s, "select.set", json!({"ids": [die.0, art.0]}));
+    run(&mut s, "object.transformEach", json!({"rotate": 12}));
+    run(&mut s, "object.resetBoundingBox", json!({}));
+    for id in [die, art] {
+        assert_eq!(s.doc().unwrap().doc.node(id).unwrap().bbox_angle, 0.0, "như file .ai: không lưu góc");
+    }
+    run(&mut s, "select.set", json!({"ids": [die.0, art.0]}));
+    let r = run(&mut s, "dancard.dieLayout", json!({"paperW": "12", "paperH": "10", "ponClear": "7,5"}));
+    assert_eq!(r["count"], 3, "{r}");
+    let d = &s.doc().unwrap().doc;
+    let quarter = |a: f64| ((a / 90.0).round() * 90.0 - a).abs() < 1e-6;
+    for c in kids(layer_named(d, "Dàn bế - Khuôn")) {
+        let b = c.geometric_bounds().unwrap();
+        assert!((b.width() - 30.0 * MM).abs() < 1e-6 && (b.height() - 50.0 * MM).abs() < 1e-6, "khuôn phải thẳng: {b:?}");
+        assert!(quarter(c.bbox_angle), "khung transform khuôn đúng hướng dàn: {}", c.bbox_angle);
+    }
+    for a in kids(layer_named(d, "Dàn bế - Bài")) {
+        let b = a.geometric_bounds().unwrap();
+        assert!((b.width() - 20.0 * MM).abs() < 1e-6 && (b.height() - 40.0 * MM).abs() < 1e-6, "bài phải thẳng theo khuôn: {b:?}");
+        assert!(quarter(a.bbox_angle), "khung transform bài đúng hướng dàn: {}", a.bbox_angle);
+    }
+}
+
+/// Khuôn xoay 12° ngay trong app (góc đã lưu) còn Bài lấy từ file .ai (nghiêng 12° nhưng không lưu
+/// góc): Bài bỏ cùng góc với khuôn, khung transform của từng bản Bài theo đúng hướng dàn.
+#[test]
+fn dan_be_khuon_luu_goc_bai_tu_file_ai() {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 800, "height": 600, "colorMode": "cmyk"}));
+    let die = rect_at(&mut s, 120.0, 100.0, 50.0, 30.0);
+    let art = rect_at(&mut s, 360.0, 98.0, 40.0, 20.0);
+    run(&mut s, "select.set", json!({"ids": [die.0, art.0]}));
+    run(&mut s, "object.transformEach", json!({"rotate": 12}));
+    run(&mut s, "select.set", json!({"ids": [art.0]}));
+    run(&mut s, "object.resetBoundingBox", json!({}));
+    let d = &s.doc().unwrap().doc;
+    assert!((d.node(die).unwrap().bbox_angle - 12.0).abs() < 1e-9 && d.node(art).unwrap().bbox_angle == 0.0);
+    run(&mut s, "select.set", json!({"ids": [die.0, art.0]}));
+    let r = run(&mut s, "dancard.dieLayout", json!({"paperW": "12", "paperH": "10", "ponClear": "7,5"}));
+    assert_eq!(r["count"], 3, "{r}");
+    let d = &s.doc().unwrap().doc;
+    let quarter = |a: f64| ((a / 90.0).round() * 90.0 - a).abs() < 1e-6;
+    for (layer, (w, h)) in [("Dàn bế - Khuôn", (30.0, 50.0)), ("Dàn bế - Bài", (20.0, 40.0))] {
+        for c in kids(layer_named(d, layer)) {
+            let b = c.geometric_bounds().unwrap();
+            assert!((b.width() - w * MM).abs() < 1e-6 && (b.height() - h * MM).abs() < 1e-6, "{layer}: {b:?}");
+            assert!(quarter(c.bbox_angle), "{layer}: khung transform đúng hướng dàn, không lệch 12°: {}", c.bbox_angle);
+        }
+    }
 }

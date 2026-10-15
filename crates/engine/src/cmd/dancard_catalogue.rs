@@ -2,8 +2,8 @@
 //!
 //! Chọn các trang theo thứ tự đọc (số trang chia hết cho 4), nhập khổ một trang. Tờ PON 43 × 32,5
 //! cm, vùng dàn an toàn 42,2 × 29,9 cm: ưu tiên 2 cuốn / tờ (nằm trái/phải, cắt một dao ở giữa),
-//! xoay cuốn khi cần, không vừa thì 1 cuốn / tờ. Mỗi trang vector được làm phẳng thành ảnh 500
-//! ppi (trang chỉ có ảnh thì giữ), co đúng khổ, rồi ghép cặp đóng gáy giữa: tờ thứ s mặt trước
+//! xoay cuốn khi cần, không vừa thì 1 cuốn / tờ. Mỗi trang được dựng thẳng theo khung transform và
+//! giữ nguyên vector (DanCard làm phẳng thành ảnh 500 ppi), co đúng khổ, rồi ghép cặp đóng gáy giữa: tờ thứ s mặt trước
 //! [n − 2s, 1 + 2s], mặt sau [2 + 2s, n − 1 − 2s]. Ruột phía trong bóp dần 0,25 mm mỗi tờ quanh
 //! gáy. PON chữ L vẽ quanh vùng đã dàn (2 cuốn thêm dấu giữa) trên layer riêng, khóa lại. Ghi chú
 //! bìa / ruột thêm phía trên cuốn. Cả lần dàn là một bước hoàn tác.
@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use vectorcraft_color::{Color, Paint};
-use vectorcraft_doc::{Appearance, Artboard, Document, Node, NodeId, NodeKind, Scaling};
+use vectorcraft_doc::{Appearance, Artboard, Document, Node, NodeId, Scaling};
 use vectorcraft_geom::{Affine, Point, Rect};
 
-use super::layout::{raster_in, rotate_node, translate_node, vis};
+use super::layout::{rotate_node, translate_node, vis};
 use super::{number_param, roots_in_paint_order};
 use crate::cmd::*;
 use crate::{EngineError, Result, Session};
@@ -40,7 +40,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         "DanCard: Dàn Catalogue",
         [],
         None,
-        "{width, height: cm (khổ một trang), coverNote?: ghi chú bìa (artboard 1), insideNote?: ghi chú ruột (thêm sau \"RUỘT n\")} dàn các trang đang chọn (thứ tự đọc: trên → dưới, trái → phải; số trang chia hết cho 4) thành catalogue đóng gáy giữa trên tờ PON 43 × 32,5 cm: tự chọn 2 hay 1 cuốn / tờ, trang vector làm phẳng 500 ppi, mỗi tờ hai artboard trước / sau, PON tự vẽ, một bước hoàn tác → {message, copies, rotate, faces, groups}",
+        "{width, height: cm (khổ một trang), coverNote?: ghi chú bìa (artboard 1), insideNote?: ghi chú ruột (thêm sau \"RUỘT n\")} dàn các trang đang chọn (thứ tự đọc: trên → dưới, trái → phải; số trang chia hết cho 4) thành catalogue đóng gáy giữa trên tờ PON 43 × 32,5 cm: tự chọn 2 hay 1 cuốn / tờ, trang dựng thẳng theo khung transform, giữ vector, mỗi tờ hai artboard trước / sau, PON tự vẽ, một bước hoàn tác → {message, copies, rotate, faces, groups}",
         has_selection,
         catalogue
     )]
@@ -71,18 +71,6 @@ pub(super) fn plan_for(page_w: f64, page_h: f64) -> Option<Plan> {
         Some(Plan { copies: 1, rotate: true, book_w: spread_h, book_h: spread_w })
     } else {
         None
-    }
-}
-
-/// Chỉ có ảnh (ảnh, hay group / clip group chỉ chứa ảnh): giữ nguyên, không làm phẳng lại.
-pub(super) fn image_only(n: &Node) -> bool {
-    match &n.kind {
-        NodeKind::Image(_) => true,
-        NodeKind::Group { children, clip } => {
-            let content: Vec<_> = children.iter().skip(usize::from(*clip)).collect();
-            !content.is_empty() && content.iter().all(|c| image_only(c))
-        }
-        _ => false,
     }
 }
 
@@ -167,7 +155,8 @@ pub(super) fn reading_order(d: &Document, ids: &[NodeId]) -> Result<Vec<NodeId>>
         if n.locked {
             return Err(EngineError::Other("Mở khóa layer và object đã chọn trước khi dàn.".into()));
         }
-        let b = vis(n).ok_or_else(|| EngineError::Other("Có artwork không đo được kích thước.".into()))?;
+        let b =
+            super::upright_copy(d, *id).as_ref().and_then(vis).ok_or_else(|| EngineError::Other("Có artwork không đo được kích thước.".into()))?;
         items.push((*id, b));
     }
     items.sort_by(|a, b| {
@@ -177,21 +166,18 @@ pub(super) fn reading_order(d: &Document, ids: &[NodeId]) -> Result<Vec<NodeId>>
     Ok(items.into_iter().map(|(id, _)| id).collect())
 }
 
-/// Một trang đã làm phẳng (ảnh 500 ppi, trừ trang chỉ có ảnh) trên layer `layer`, co đúng `w` × `h` pt.
-pub(super) fn flatten_page(d: &mut Document, id: NodeId, layer: NodeId, w: f64, h: f64) -> Result<NodeId> {
-    let n = d.node(id).ok_or(EngineError::NoNode(id))?;
-    let flat = if image_only(n) {
-        id
-    } else {
-        let frame = vis(n).ok_or_else(|| EngineError::Other("Không xác định được khung để raster.".into()))?;
-        raster_in(d, id, frame)?
-    };
+/// Một trang dựng thẳng theo khung transform (giữ vector) trên layer `layer`, co đúng `w` × `h` pt.
+pub(super) fn place_page(d: &mut Document, id: NodeId, layer: NodeId, w: f64, h: f64) -> Result<NodeId> {
+    if d.node(id).and_then(vis).is_none() {
+        return Err(EngineError::Other("Có trang không đo được kích thước.".into()));
+    }
+    super::make_upright(d, id);
     // Chuyển sang layer dàn.
-    let removed = d.remove_many(&[flat])?;
-    let node = removed.into_iter().next().map(|a| (*a).clone()).ok_or(EngineError::NoNode(flat))?;
-    let flat = d.insert(Some(layer), usize::MAX, node)?;
-    resize_to(d, flat, w, h);
-    Ok(flat)
+    let removed = d.remove_many(&[id])?;
+    let node = removed.into_iter().next().map(|a| (*a).clone()).ok_or(EngineError::NoNode(id))?;
+    let page = d.insert(Some(layer), usize::MAX, node)?;
+    resize_to(d, page, w, h);
+    Ok(page)
 }
 
 fn catalogue(s: &mut Session, p: &Value) -> Result<Value> {
@@ -233,7 +219,7 @@ fn catalogue(s: &mut Session, p: &Value) -> Result<Value> {
         };
         let mut pages = vec![];
         for id in &order {
-            pages.push(flatten_page(d, *id, layout_layer, page_wpt, page_hpt)?);
+            pages.push(place_page(d, *id, layout_layer, page_wpt, page_hpt)?);
         }
         // Artboard: mỗi tờ hai artboard (trước, sau) cạnh nhau, tối đa 16 tờ một cột.
         let pon_layer = fresh_layer(d, PON_LAYER)?;

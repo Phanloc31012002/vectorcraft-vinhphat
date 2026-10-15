@@ -76,7 +76,74 @@ pub(super) fn section(app: &mut VectorcraftApp, ui: &mut Ui) {
             "twoSided": two,
             "multiPerArtboard": multi,
         });
-        super::run_and_note(app, ui, "danbe", "dancard.dieLayout", params);
+        if super::run_and_note(app, ui, AREA, "dancard.dieLayout", params).is_some() {
+            let super::Note(text, _) = super::pstate::<super::Note>(ui.ctx(), &super::note_id(AREA));
+            if let Some((n, rest)) = super::count_prefix(&text) {
+                app.status(format!("{n} con / tờ. {rest}"));
+            }
+            // Tờ mới đặt từ góc trên trái canvas như DanCard: đưa khung nhìn tới tờ đầu tiên vừa tạo.
+            // Chỉ là khung nhìn: không tới được (chưa có cửa sổ vẽ) thì bỏ qua.
+            let _ = app.run("view.goToArtboard", json!({"index": 0}));
+        }
     }
-    super::show_note(ui, "danbe", &t, "Chọn mẫu rồi bấm Dàn bế.");
+    super::show_count_note(ui, AREA, &t, "Chọn mẫu rồi bấm Dàn bế.");
+}
+
+const AREA: &str = "danbe";
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use vectorcraft_engine::Session;
+
+    use super::*;
+    use crate::tests_labels::painted_text;
+
+    /// Như `dan_be_panel.test.js`: sáu ô khổ giấy / PON đúng thứ tự, mặc định và đơn vị; khe, lề, né
+    /// PON; gợi ý ngắn đủ ý; hai ô đánh dấu độc lập, mặc định không tick; nút Dàn bế; không còn chọn
+    /// file PON. Kết quả "[[COUNT:n]]" thành dòng "n con / tờ".
+    #[test]
+    fn o_nhap_va_ket_qua_nhu_dancard() {
+        let mut app = VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width": 600, "height": 400})).unwrap();
+        let text = painted_text(&mut app, section);
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("thiếu {s}: {text}"));
+        let order = ["Ngang giấy (cm)", "Cao giấy (cm)", "Trên (mm)", "Dưới (mm)", "Trái (mm)", "Phải (mm)"].map(at);
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "sáu ô theo đúng thứ tự người dùng yêu cầu");
+        for s in [
+            "Khe giữa 2 khuôn (mm)",
+            "Khuôn cách mép tờ (mm)",
+            "Né PON (mm)",
+            "Khuôn → Bài",
+            "Khuôn → Trước → Sau",
+            "PON tròn 5 mm",
+            "mép tờ đến tâm chấm",
+            "đường bế",
+            "mép chấm",
+            "Lật ngang",
+            "không lật gương",
+            "Mặc định mỗi mẫu một tờ",
+            "Dàn bế 2 mặt (tag)",
+            "Dàn nhiều mẫu vào một tờ",
+            "35.4",
+            "7.5",
+            "Chọn mẫu rồi bấm Dàn bế.",
+        ] {
+            at(s);
+        }
+        assert!(!text.contains("Chọn PON AI"));
+        assert!(
+            !super::super::saved_bool(&app, "beTwoSided", false) && !super::super::saved_bool(&app, "beMultiPerArtboard", false),
+            "mặc định một mặt, mỗi mẫu một tờ"
+        );
+        let text = painted_text(&mut app, |app, ui| {
+            super::super::set_pstate(
+                ui.ctx(),
+                &super::super::note_id(AREA),
+                super::super::Note("[[COUNT:42]] Dàn silhouette thật: 42 con.".into(), false),
+            );
+            section(app, ui);
+        });
+        assert!(text.contains("42 con / tờ") && text.contains("Dàn silhouette thật: 42 con.") && !text.contains("[[COUNT"), "{text}");
+    }
 }

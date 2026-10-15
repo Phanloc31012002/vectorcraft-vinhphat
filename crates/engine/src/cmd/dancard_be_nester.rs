@@ -12,11 +12,13 @@
 //!
 //! Khác bản gốc:
 //! - đồng hồ 3 giây được thay bằng ngân sách phép tính ([`Clock`]): kết quả tất định, không phụ
-//!   thuộc tốc độ máy, không dùng giờ hệ thống (wasm);
+//!   thuộc tốc độ máy (thời gian thật chỉ là chốt an toàn khi máy chậm hơn hẳn), không dùng giờ hệ
+//!   thống (wasm);
 //! - kiểm tra liên tục né PON theo sai số đường cong của chính khuôn đó, cùng quy tắc với lúc canh
 //!   tâm (bản gốc lấy sai số lớn nhất của mọi khuôn nên tờ trộn khuôn thẳng + khuôn cong có thể bị
 //!   từ chối oan);
-//! - số con mỗi tờ tối đa [`MAX_PIECES`], vùng dàn tối đa [`MAX_CELLS`] ô mỗi chiều.
+//! - số con mỗi tờ tối đa [`MAX_PIECES`] (chốt an toàn, xa hơn mọi mẫu thử của bản gốc), vùng dàn
+//!   tối đa [`MAX_CELLS`] ô mỗi chiều.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Ordering;
@@ -40,8 +42,12 @@ type Offsets = Rc<Vec<(i64, i64)>>;
 /// viên, một cặp cạnh… đã cân theo chi phí thật; các tờ thử lệch thời gian thật khoảng 0,7–1,7
 /// lần). Ngân sách 3000 ms ≈ 300 triệu phép thử.
 const WORK_PER_MS: f64 = 100_000.0;
-/// Số con tối đa trên một tờ.
-const MAX_PIECES: usize = 4000;
+/// Thời gian thật được phép gấp bao nhiêu lần ngân sách trước khi chốt an toàn dừng phép tìm.
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
+const REAL_SLACK: f64 = 2.0;
+/// Số con tối đa trên một tờ: chỉ là chốt an toàn bộ nhớ / thời gian. Bản gốc không giới hạn và
+/// bộ test của nó đòi hàng chục nghìn khuôn tí hon (13 440 hình tròn 2 mm), nên chốt đặt xa hơn.
+const MAX_PIECES: usize = 50_000;
 /// Số ô tối đa mỗi chiều của vùng dàn (0,25 mm: 5 m).
 pub(super) const MAX_CELLS: i64 = 20_000;
 /// Giới hạn số vị trí thử của một mô-típ lặp (như bản gốc).
@@ -51,9 +57,10 @@ pub(super) const ANGLES: [i64; 4] = [0, 90, 180, 270];
 
 // ---------------------------------------------------------------- ngân sách
 
-/// Đồng hồ của ngân sách: đếm phép thử (tất định: máy nhanh cho cùng một kết quả). Bản desktop
-/// còn chặn thêm bằng thời gian thật, nên máy chậm hay phép đếm hụt cũng không chạy quá ngân
-/// sách như bản gốc. Bản web (không có đồng hồ thật) và kiểm thử (cần tất định) chỉ đếm.
+/// Đồng hồ của ngân sách: đếm phép thử (tất định: mọi máy cho đúng kết quả đã kiểm bằng bộ test
+/// gốc của DanCard). Bản desktop chỉ dùng thời gian thật làm chốt an toàn khi máy chậm hơn hẳn
+/// ([`REAL_SLACK`] lần ngân sách), không để nó cắt phép tìm sớm trên máy bình thường. Bản web
+/// (không có đồng hồ thật) và kiểm thử chỉ đếm.
 #[derive(Default)]
 pub(super) struct Clock {
     work: Cell<u64>,
@@ -64,14 +71,15 @@ pub(super) struct Clock {
 impl Clock {
     /// "Mili giây" đã dùng.
     #[cfg(any(test, target_arch = "wasm32"))]
-    fn now(&self) -> f64 {
+    pub(super) fn now(&self) -> f64 {
         self.work.get() as f64 / WORK_PER_MS
     }
-    /// "Mili giây" đã dùng: phép đếm hoặc thời gian thật từ lần hỏi đầu, cái nào lớn hơn.
+    /// "Mili giây" đã dùng: theo phép đếm; thời gian thật (chia [`REAL_SLACK`]) chỉ thắng khi máy
+    /// chậm hơn hẳn.
     #[cfg(all(not(test), not(target_arch = "wasm32")))]
-    fn now(&self) -> f64 {
+    pub(super) fn now(&self) -> f64 {
         let real = self.started.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0;
-        (self.work.get() as f64 / WORK_PER_MS).max(real)
+        (self.work.get() as f64 / WORK_PER_MS).max(real / REAL_SLACK)
     }
     fn tick(&self, n: usize) {
         self.work.set(self.work.get().saturating_add(n as u64));
@@ -695,7 +703,7 @@ fn build_occ(plan: &[Slot], vs: &[Variant], rh: i64, ck: &Clock) -> Occ {
     occ
 }
 
-fn verify_plan(plan: &[Slot], vs: &[Variant], sh: &Sheet, ck: &Clock) -> bool {
+pub(super) fn verify_plan(plan: &[Slot], vs: &[Variant], sh: &Sheet, ck: &Clock) -> bool {
     let mut occ = build_occ(&[], vs, sh.rh, ck);
     for s in plan {
         let Some(v) = vs.get(s.v) else { return false };
@@ -774,7 +782,7 @@ fn count_types(plan: &[Slot], n: usize) -> Vec<usize> {
 }
 
 /// Nhiều mẫu trên một tờ: số con mỗi mẫu lệch nhau tối đa 1.
-fn balanced(plan: &[Slot], n: usize) -> bool {
+pub(super) fn balanced(plan: &[Slot], n: usize) -> bool {
     if n <= 1 {
         return true;
     }
@@ -1295,7 +1303,7 @@ pub(super) fn right_profile_contact(a: &Variant, b: &Variant, dy: i64, ck: &Cloc
 
 // ---------------------------------------------------------------- seed: hàng xen kẽ
 
-fn alternating_row_plans(vs: &[Variant], tc: usize, sh: &Sheet, deadline: f64, ck: &Clock) -> Vec<Plan> {
+pub(super) fn alternating_row_plans(vs: &[Variant], tc: usize, sh: &Sheet, deadline: f64, ck: &Clock) -> Vec<Plan> {
     if tc != 1 {
         return Vec::new();
     }
@@ -1477,7 +1485,7 @@ fn row_contact(cols: &[Cols], dc: &mut DownCache, rc: &mut HashMap<(usize, usize
 }
 
 /// Chồng các hàng đầy của một hoặc hai hướng; trả tối đa 2 phương án đã kiểm tra.
-fn compositional_band_plans(vs: &[Variant], tc: usize, sh: &Sheet, gap: f64, step: f64, deadline: f64, ck: &Clock) -> Vec<Plan> {
+pub(super) fn compositional_band_plans(vs: &[Variant], tc: usize, sh: &Sheet, gap: f64, step: f64, deadline: f64, ck: &Clock) -> Vec<Plan> {
     if tc != 1 || vs.is_empty() {
         return Vec::new();
     }
@@ -2081,7 +2089,7 @@ fn centre_plan(plan: &[Slot], vs: &[Variant], sh: &Sheet, ck: &Clock) -> Plan {
     plan.to_vec()
 }
 
-fn edge_margin(plan: &[Slot], vs: &[Variant], rw: i64, rh: i64) -> i64 {
+pub(super) fn edge_margin(plan: &[Slot], vs: &[Variant], rw: i64, rh: i64) -> i64 {
     if plan.is_empty() {
         return 0;
     }
@@ -2117,7 +2125,7 @@ fn repair_plans(best: &[Slot], vs: &[Variant], tc: usize, sh: &Sheet, deadline: 
 }
 
 /// Giữ số con, đẩy cặp khuôn dài sát mép nhất lồng sâu hơn để khối cách mép đều hơn.
-fn polish_edges(plan: &[Slot], vs: &[Variant], sh: &Sheet, gap: f64, step: f64, deadline: f64, ck: &Clock) -> Plan {
+pub(super) fn polish_edges(plan: &[Slot], vs: &[Variant], sh: &Sheet, gap: f64, step: f64, deadline: f64, ck: &Clock) -> Plan {
     if plan.len() < 2 || plan.len() > 80 {
         return plan.to_vec();
     }
@@ -2378,7 +2386,7 @@ fn physical_bounds(plan: &[PSlot], vs: &[Variant], step: f64) -> (f64, f64, f64,
 }
 
 /// Dời nguyên khối về giữa vùng dàn thật; PON chặn thì tới gần giữa nhất có thể.
-fn centre_physical_plan(plan: &[PSlot], vs: &[Variant], area: (f64, f64), dots: &[Dot], step: f64, ck: &Clock) -> PPlan {
+pub(super) fn centre_physical_plan(plan: &[PSlot], vs: &[Variant], area: (f64, f64), dots: &[Dot], step: f64, ck: &Clock) -> PPlan {
     if plan.is_empty() {
         return Vec::new();
     }
@@ -2472,7 +2480,7 @@ fn centre_physical_plan(plan: &[PSlot], vs: &[Variant], area: (f64, f64), dots: 
 }
 
 /// Nới vị trí (không đổi hình) khi lưới chưa đạt khe liên tục vì sai số đường cong.
-fn open_physical_gap_plan(plan: &[PSlot], vs: &[Variant], area: (f64, f64), dots: &[Dot], gap: f64, step: f64, ck: &Clock) -> PPlan {
+pub(super) fn open_physical_gap_plan(plan: &[PSlot], vs: &[Variant], area: (f64, f64), dots: &[Dot], gap: f64, step: f64, ck: &Clock) -> PPlan {
     if plan.len() < 2 {
         return plan.to_vec();
     }
