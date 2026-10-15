@@ -38,6 +38,8 @@ mod layout;
 mod mau;
 #[path = "dancard_raster.rs"]
 mod raster;
+#[path = "dancard_regroup.rs"]
+mod regroup;
 #[path = "dancard_tutro.rs"]
 mod tutro;
 #[path = "dancard_variable.rs"]
@@ -595,6 +597,21 @@ pub(super) fn make_upright(d: &mut Document, id: NodeId) -> f64 {
         }
         None => 0.0,
     }
+}
+
+/// Mở file .ai / PDF mà bản chỉnh sửa của Illustrator vẽ khác trang PDF (`fileio::load`, khi
+/// VectorCraft dùng trang PDF thay cho bản chỉnh sửa): hình giữ đúng như trang `page`, các object
+/// được gom lại thành group như bản chỉnh sửa `private` (dữ liệu `AIPrivateData` của file) — xem
+/// `dancard_regroup.rs`. Không đọc được bản chỉnh sửa thì trang giữ nguyên.
+pub(crate) fn keep_groups(private: &[u8], mut page: Document, mut warnings: Vec<String>) -> (Document, Vec<String>) {
+    // Chỉ cần khung và cấu trúc của bản chỉnh sửa: đọc riêng nó, không so lại với trang (đã so,
+    // khác trang nên mới tới đây) và chữ đọc như chữ.
+    let Ok((editing, _)) = vectorcraft_eps::ai_alone(private) else { return (page, warnings) };
+    let made = regroup::regroup(&mut page, &editing);
+    if made > 0 {
+        warnings.push(format!("DanCard: đã gom lại {made} group theo bản chỉnh sửa lưu trong file; hình giữ đúng như trang PDF."));
+    }
+    (page, warnings)
 }
 
 /// Trục để raster `ids` theo khung transform (Object › Rasterize `followAngle`): (trang → hệ trục

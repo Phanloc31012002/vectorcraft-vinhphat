@@ -988,3 +988,16 @@ fn a_gradient_mesh_reads_as_a_patch() {
     let e = read(stream(&layer(&mesh("Separation"))).as_bytes()).unwrap_err();
     assert!(e.contains("gradient meshes"), "{e}");
 }
+
+/// A path's output resolution (`100 Ar`, `800 Ar` before its path, as cutting plotters' registration
+/// marks have it) changes nothing that is drawn: the group reads with its paths (DanCard fork: such
+/// files came in from their PDF part, their groups lost).
+#[test]
+fn a_paths_output_resolution_is_read_past() {
+    let art_ = format!("0 Ae\nu\n100 Ar\n{RED}{}f\n800 Ar\n{}f\nU\n", rect_path(0.0, 0.0, 10.0, 10.0), rect_path(20.0, 0.0, 30.0, 10.0));
+    let doc = read_ok(&layer(&art_)).doc;
+    let top = art(&doc);
+    assert_eq!(top.len(), 1, "one group");
+    assert!(matches!(top[0].kind, NodeKind::Group { clip: false, .. }));
+    assert_eq!(top[0].children().map(Vec::len), Some(2));
+}

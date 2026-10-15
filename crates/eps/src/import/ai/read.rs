@@ -404,6 +404,11 @@ const IGNORED: &[&str] = &[
     "Np",
     // Flatness (`i`): how finely curves print.
     "i",
+    // A path's output resolution in dots per inch (`800 Ar`, before the path: its `resolution` in
+    // the public scripting reference, https://illustrator-scripting-guide.readthedocs.io/jsobjref/PathItem.html),
+    // also how finely curves print. Cutting plotters' registration marks set it, and such files didn't
+    // open with their groups (DanCard fork, IN Vĩnh Phát).
+    "Ar",
     "TE",
     "TZ",
     "Xs",

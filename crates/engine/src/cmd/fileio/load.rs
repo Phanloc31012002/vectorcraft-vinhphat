@@ -162,8 +162,9 @@ fn through_editing_data(bytes: &[u8], opts: &LoadOptions, doc: Document, warning
     let outlined = opts.text_as == vectorcraft_pdf::TextAs::Outlines;
     let (doc, mut warnings, read) = vectorcraft_eps::layered_ai(&private, doc, warnings, outlined, opts.trust_editing_data);
     // The layers weren't read (or couldn't be): the notes of reading the PDF part still hold.
+    // DanCard: the page's art, grouped as the editing data groups it when that can be read.
     if !read {
-        return (doc, warnings);
+        return crate::cmd::dancard::keep_groups(&private, doc, warnings);
     }
     // The layers hold the art that the PDF part leaves out or, in a PDF, that the import clipped
     // to the page.
