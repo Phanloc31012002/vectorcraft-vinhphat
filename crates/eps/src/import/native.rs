@@ -875,7 +875,9 @@ struct Frame<'a> {
 fn build(data: &[u8], visible: Option<&Document>, page: Page, outlined: bool, trust: bool, unit: f64) -> Result<(Document, Vec<String>), String> {
     // An EPS (its page is its art) draws a Large Canvas page at full size; a `.ai` keeps its art
     // space, as its PDF part may (#2031).
-    let Structure { mut doc, to_doc, bbox, artboard, template, hidden_unread, slot_names, warnings } = ai::read(data, matches!(page, Page::Art))?;
+    // DanCard fork: trusting the editing data, what it can't draw yet (opacity masks) is drawn past.
+    let read = if trust { ai::read_trusting } else { ai::read };
+    let Structure { mut doc, to_doc, bbox, artboard, template, hidden_unread, slot_names, warnings } = read(data, matches!(page, Page::Art))?;
     // Editing data in the units of the page's user space ([`in_units`]) is compared with the page
     // scaled down to those units, and the document read from it is scaled up by `unit`.
     let board = artboard.map(|a| to_doc.transform_rect_bbox(a));
@@ -1278,6 +1280,13 @@ fn place_art(layer: &mut Node, pages: &[Rect], moves: &[Vec2]) {
 pub fn ai_alone(private: &[u8]) -> Result<(Document, Vec<String>), String> {
     let data = ai::decode_private(private)?;
     build(&data, None, Page::Artboard, false, false, 1.0)
+}
+
+/// DanCard fork: [`ai_alone`], read past what the editing data can't draw yet (opacity masks:
+/// `ai::read_trusting`), for its groups.
+pub fn ai_alone_trusting(private: &[u8]) -> Result<(Document, Vec<String>), String> {
+    let data = ai::decode_private(private)?;
+    build(&data, None, Page::Artboard, false, true, 1.0)
 }
 
 /// Does the editing data (or a program in the legacy format) have layers?

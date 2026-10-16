@@ -1050,6 +1050,27 @@ fn mo_file_ai_giu_nguyen_group_ca_khi_ve_khac_trang_pdf() {
 }
 
 #[test]
+fn mo_file_ai_co_opacity_mask_van_giu_group() {
+    use vectorcraft_testkit::ai;
+    // Hình đầu của group có opacity mask (mask trong ArtDictionary, hình của nó giữa X= và X+):
+    // VectorCraft gốc không đọc được mask nên mở theo trang PDF, rã group; DanCard đọc tiếp, hình
+    // hiện cả phần mask che, kèm lời báo.
+    let mask = "%_/ArtDictionary :\n%_/Mask :\n%_1 /Bool (Linked) ,\n%_0 /Bool (Disabled) ,\n%_X=\n%_0 0 0 1 k\n%_10 50 m\n%_40 50 L\n\
+                %_40 90 L\n%_10 90 L\n%_10 50 L\n%_f\n%_X+\n%_ (Art) ,\n%_1 /Bool (Clipping) ,\n%_0 /Bool (Inverted) ,\n%_; (AI9_Mask) ,\n%_;\n";
+    let pair = format!("0 Ae\nu\n0 g\n{}f\n{mask}{}f\nU\n{}", ai::rect(10.0, 50.0, 40.0, 90.0), ai::rect(50.0, 50.0, 80.0, 90.0), ai::named("Pair"));
+    let data = ai::editing_data(200.0, 100.0, &ai::layer("Art", &pair));
+    let file = ai::ai(data.as_bytes(), "0 g 10 50 30 40 re f 50 50 30 40 re f");
+    let mut s = Session::new();
+    let r = mo_file(&mut s, &file, json!({}));
+    assert_eq!(ten_layer(&s), ["Art"], "{r}");
+    let art = s.doc().unwrap().doc.layers[0].children().unwrap().clone();
+    let pair = art.iter().find(|n| n.name.as_deref() == Some("Pair")).expect("group Pair");
+    assert!(matches!(&pair.kind, NodeKind::Group { children, .. } if children.len() == 2), "{:?}", pair.kind);
+    let first = r["warnings"][0].as_str().unwrap_or_default();
+    assert!(first.starts_with("DanCard: 1 object có opacity mask"), "{r}");
+}
+
+#[test]
 fn trang_pdf_sua_sau_ban_chinh_sua_thi_mo_theo_trang() {
     let mut s = Session::new();
     let (truoc, sau) = ("D:20261002101134+08'00'", "D:20261002111134+08'00'");

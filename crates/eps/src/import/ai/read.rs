@@ -63,9 +63,11 @@ use crate::ps;
 
 #[path = "legacy_text.rs"]
 mod legacy_text;
-// DanCard fork: images the reader would leave out (`dancard_read.rs`).
+// DanCard fork: images the reader would leave out, and reading past opacity masks
+// (`dancard_read.rs`).
 #[path = "dancard_read.rs"]
 mod dancard_read;
+pub use dancard_read::read_trusting;
 
 /// Deepest nesting of layers, groups and dictionaries.
 const MAX_DEPTH: usize = 256;
@@ -368,6 +370,8 @@ struct Reader<'a> {
     nodes: usize,
     /// What layers that show have that this reader doesn't read (errors).
     unsupported: BTreeSet<String>,
+    /// DanCard fork: opacity masks drawn past, read trusting the editing data (`dancard_read`).
+    dancard_masks: Option<usize>,
     /// Operators the reader doesn't know on layers that show.
     unknown: BTreeSet<String>,
     /// What layers that don't show have that this reader doesn't read.
@@ -526,6 +530,7 @@ impl<'a> Reader<'a> {
             after_object: false,
             nodes: 0,
             unsupported: BTreeSet::new(),
+            dancard_masks: None,
             unknown: BTreeSet::new(),
             hidden_unread: BTreeSet::new(),
             bbox: None,
@@ -1420,7 +1425,10 @@ impl<'a> Reader<'a> {
         if let Some(mask) = o.obj("AI9_Mask").or_else(|| o.obj("Mask"))
             && mask.nums("Disabled").first().copied() != Some(1.0)
         {
-            self.unreadable("opacity masks");
+            // DanCard fork: read trusting the editing data, the object is drawn whole instead.
+            if !self.dancard_mask() {
+                self.unreadable("opacity masks");
+            }
         }
         let name = match o.text("AIArtName") {
             Some(name) => name,

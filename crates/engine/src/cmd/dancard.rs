@@ -614,7 +614,7 @@ pub(crate) fn keep_groups(private: &[u8], mut page: Document, mut warnings: Vec<
     }
     // Chỉ cần khung và cấu trúc của bản chỉnh sửa: đọc riêng nó, không so lại với trang (đã so,
     // khác trang nên mới tới đây) và chữ đọc như chữ.
-    if let Ok((editing, _)) = vectorcraft_eps::ai_alone(private) {
+    if let Ok((editing, _)) = vectorcraft_eps::ai_alone_trusting(private) {
         let made = regroup::regroup(&mut page, &editing);
         if made > 0 {
             notes.push(format!("DanCard: đã gom lại {made} group theo bản chỉnh sửa lưu trong file; hình giữ đúng như trang PDF."));

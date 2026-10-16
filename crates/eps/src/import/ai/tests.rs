@@ -646,6 +646,25 @@ fn an_image_of_more_pixels_than_are_read_comes_in_at_a_lower_resolution() {
 }
 
 #[test]
+fn read_trusting_draws_an_object_whole_past_its_opacity_mask() {
+    // DanCard fork. A rectangle with the opacity mask of `what_it_doesnt_read_is_an_error_where_it_shows`:
+    // trusting the editing data, it reads with the rectangle alone (the mask's own art isn't drawn),
+    // and a note first.
+    let mask = "%_/ArtDictionary :\n%_/XMLUID : (M) ; (AI10_ArtUID) ,\n%_/Mask :\n%_1 /Bool (Linked) ,\n%_0 /Bool (Disabled) ,\n%_X=\n\
+                %_0 0 0 1 k\n%_0 0 m\n%_5 0 L\n%_5 5 L\n%_0 5 L\n%_0 0 L\n%_f\n%_X+\n%_ (Art) ,\n%_1 /Bool (Clipping) ,\n%_0 /Bool (Inverted) ,\n%_; (AI9_Mask) ,\n%_;\n";
+    let data = stream(&layer(&format!("0 0 0 1 k\n{}f\n{mask}", rect_path(0.0, 0.0, 10.0, 10.0))));
+    assert!(read(data.as_bytes()).unwrap_err().contains("opacity masks"));
+    let r = super::read_trusting(data.as_bytes(), true).unwrap();
+    let a = art(&r.doc);
+    assert_eq!(a.len(), 1, "{a:#?}");
+    assert!(matches!(a[0].kind, NodeKind::Path { .. }), "{:?}", a[0].kind);
+    assert!(r.warnings.first().is_some_and(|w| w.starts_with("DanCard: 1 object có opacity mask")), "{:?}", r.warnings);
+    // Without a mask, nothing to say.
+    let plain = super::read_trusting(stream(&layer(&format!("{}f\n", rect_path(0.0, 0.0, 10.0, 10.0)))).as_bytes(), true).unwrap();
+    assert!(!plain.warnings.iter().any(|w| w.contains("opacity mask")), "{:?}", plain.warnings);
+}
+
+#[test]
 fn a_cmyk_image_of_more_pixels_than_are_read_keeps_its_inks_at_a_lower_resolution() {
     // DanCard fork. 100 × 50 CMYK pixels, columns cyan and black in turn, with an alpha channel
     // that hides every other row: read as 50 × 25 pixels of the mean inks, still CMYK, over the

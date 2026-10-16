@@ -5,13 +5,46 @@
 //!   hold, and the note it writes at the top of such data.
 //! - An image of more pixels than [`MAX_PIXELS`] (a large photo placed small, as print files have
 //!   them) at a lower resolution, its CMYK inks kept as the reader keeps them at full size.
+//! - [`read_trusting`]: the editing data read past what the reader can't draw yet, an object's
+//!   opacity mask (which [`super::read`] names, so the file comes from its PDF part, its groups
+//!   lost): the object is drawn whole, as before the reader named masks, with a note. For a file
+//!   opened trusting its editing data whatever it draws (DanCard keeps the groups).
 
 use vectorcraft_doc::ImageBlob;
 use vectorcraft_doc::cmyk::Inks;
 
-use super::{MAX_PIXELS, MAX_SOURCE_PIXELS, Reader, cmyk_rgb};
+use super::{MAX_PIXELS, MAX_SOURCE_PIXELS, Reader, Structure, cmyk_rgb};
+
+/// [`super::read`], an object's opacity mask passed over (the object drawn whole) with a note
+/// rather than an error.
+pub fn read_trusting(data: &[u8], large_canvas: bool) -> Result<Structure, String> {
+    let mut r = Reader::new(data);
+    r.large_canvas = large_canvas.then_some(1.0);
+    r.dancard_masks = Some(0);
+    r.run()?;
+    let masks = r.dancard_masks.unwrap_or(0);
+    let mut read = r.finish()?;
+    if masks > 0 {
+        read.warnings.insert(
+            0,
+            format!(
+                "DanCard: {masks} object có opacity mask (mặt nạ độ trong) VectorCraft chưa đọc được từ bản chỉnh sửa: \
+                 object hiện cả phần mask che, group giữ nguyên; xem kỹ trước khi in."
+            ),
+        );
+    }
+    Ok(read)
+}
 
 impl Reader<'_> {
+    /// An object's opacity mask, read trusting the editing data ([`read_trusting`]): counted, and
+    /// the object drawn whole → whether it was (otherwise the mask is named, as the reader does).
+    pub(super) fn dancard_mask(&mut self) -> bool {
+        let Some(n) = self.dancard_masks.as_mut() else { return false };
+        *n += 1;
+        true
+    }
+
     /// An image `dancard_compact` kept as a JPEG file (`data`), placed by the matrix `m` as samples
     /// of its size are.
     pub(super) fn jpeg_image(&mut self, m: &[f64], data: &[u8]) -> Result<(), String> {
