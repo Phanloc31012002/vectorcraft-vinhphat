@@ -847,8 +847,12 @@ mod tests {
         }
         let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
         let r = super::super::read(&out, false).unwrap();
-        let NodeKind::Image(im) = &r.doc.layers[0].children().unwrap()[0].kind else { panic!() };
-        assert_eq!(r.doc.images.get(&im.key).unwrap().mime, "image/png");
+        let node = &r.doc.layers[0].children().unwrap()[0];
+        let NodeKind::Image(im) = &node.kind else { panic!() };
+        // Its inks kept as the reader keeps CMYK samples (a CMYK TIFF), its alpha its opacity mask.
+        let blob = r.doc.images.get(&im.key).unwrap();
+        assert_eq!((blob.mime.as_str(), blob.is_cmyk()), ("image/tiff", true));
+        assert!(node.extras().mask.is_some(), "the alpha channel hides part of it");
         assert!(im.width < 64, "{}", im.width);
     }
 
