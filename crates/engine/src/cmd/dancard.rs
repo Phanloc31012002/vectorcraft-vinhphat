@@ -42,6 +42,8 @@ mod raster;
 mod regroup;
 #[path = "dancard_tutro.rs"]
 mod tutro;
+#[path = "dancard_varexport.rs"]
+mod varexport;
 #[path = "dancard_variable.rs"]
 mod variable;
 pub(crate) use raster::{Fit, image_node, render_raster};
@@ -100,6 +102,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(ctl::specs());
     v.extend(be::specs());
     v.extend(variable::specs());
+    v.extend(varexport::specs());
     v.extend([
         cmd!(
             query "dancard.transform",

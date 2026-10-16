@@ -135,6 +135,8 @@ const TABS: &[(&str, &str)] = &[
 ];
 
 pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
+    // Lần xuất file theo bản ghi (tab Variable) chạy tiếp một bản ghi, ở tab nào cũng vậy.
+    variable::tick(app, ui.ctx());
     style::scope(ui, MARGIN, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
         let tab = current_tab(app);

@@ -564,6 +564,23 @@ pub(super) fn readout(ui: &mut Ui, value: &str) -> Response {
     resp
 }
 
+/// Thanh tiến độ: khung như ô kết quả, phần đã xong (`done` trên 0…1) tô màu nhấn, chữ `text`
+/// (vd. "12/500 · 012.pdf") ở giữa, dài quá thì bị cắt.
+pub(super) fn progress(ui: &mut Ui, done: f32, text: &str) -> Response {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, INPUT_H), Sense::hover());
+    let painter = ui.painter();
+    painter.rect(rect, CornerRadius::same(5), INPUT, Stroke::new(1.0, LINE_SOFT), StrokeKind::Inside);
+    let done = if done.is_finite() { done.clamp(0.0, 1.0) } else { 0.0 };
+    if done > 0.0 {
+        let fill = Rect::from_min_size(rect.min, vec2(rect.width() * done, rect.height())).shrink(2.0);
+        painter.rect_filled(fill, CornerRadius::same(4), ACCENT.gamma_multiply(0.55));
+    }
+    painter.with_clip_rect(rect.shrink(2.0)).text(rect.center(), Align2::CENTER_CENTER, text, theme::semibold(12.0), INK);
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::ProgressIndicator, true, text));
+    resp
+}
+
 /// Bề rộng một cột của [`columns`] khi chia `n` cột.
 pub(super) fn column_width(ui: &Ui, n: usize) -> f32 {
     let n = n.max(1);
