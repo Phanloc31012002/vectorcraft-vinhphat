@@ -73,7 +73,7 @@ fail() {
 }
 cargo fmt --all -- --check || fail "cargo fmt"
 cargo test -p vectorcraft-engine --lib -- dancard tests_prefs || fail "test DanCard (engine)"
-cargo test -p vectorcraft-ui-egui --lib -- dancard i18n:: canvas:: dialogs:: prefs || fail "test DanCard (giao diện)"
+cargo test -p vectorcraft-ui-egui --lib -- dancard i18n:: canvas:: dialogs:: prefs panel_docking floating:: dock:: || fail "test DanCard (giao diện, kể cả bảng kéo to nhỏ và ghép bảng)"
 cargo test -p vectorcraft --bin vectorcraft -- dancard_update single_instance || fail "test DanCard (app: tự cập nhật, một cửa sổ)"
 cargo test -p vectorcraft-engine --test command_sweep || fail "quét mọi lệnh với tham số rác"
 # Clippy: build hỏng là lỗi; cảnh báo chỉ tính ở file của DanCard (cảnh báo mới do clippy bản mới

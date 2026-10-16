@@ -329,14 +329,25 @@ pub fn floating_panel(app: &mut VectorcraftApp, ctx: &egui::Context) {
     let right = right - 6.0;
     // The tabbed group's panels fill their height (Layers) or scroll (Properties): give them one
     // that keeps the flyout on screen.
-    let width = panel_width(id);
-    let tall = (screen.height() - FLYOUT_TOP - 26.0 - 20.0 - 40.0).clamp(160.0, 560.0);
+    // DanCard fork: a size given by hand (`dancard_panels`), else the panel's own.
+    let sized = crate::dancard_panels::size(app, id);
+    let max = vec2(screen.width() - 24.0, screen.bottom() - FLYOUT_TOP - 8.0);
+    let width = sized.map_or_else(|| panel_width(id), |s| s.x.min(max.x).max(crate::dancard_panels::MIN.x));
+    let tall = match sized {
+        Some(s) => (s.y.min(max.y) - 26.0).max(120.0),
+        None => (screen.height() - FLYOUT_TOP - 26.0 - 20.0 - 40.0).clamp(160.0, 560.0),
+    };
+    let mut resized = None;
     let mut open = true;
     let mut torn = None;
     let area = egui::Area::new(egui::Id::new("icon-panel")).order(egui::Order::Foreground).pivot(egui::Align2::RIGHT_TOP);
     area.fixed_pos(egui::pos2(right, FLYOUT_TOP)).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(t.panel).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::ZERO).show(ui, |ui| {
             ui.set_width(width);
+            // DanCard fork: as tall as it was made, whatever its panel shows.
+            if let Some(s) = sized {
+                ui.set_min_height(s.y.min(max.y));
+            }
             let (strip, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
             ui.painter().rect_filled(strip, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.panel_darker);
             let title = Rect::from_min_size(
@@ -357,13 +368,24 @@ pub fn floating_panel(app: &mut VectorcraftApp, ctx: &egui::Context) {
             if drag.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
                 torn = Some(title.left());
             }
+            // DanCard fork: say that the title moves the panel (it floats it).
+            drag.on_hover_text(tl!("Drag to float the panel group"));
             // Torn off, or floated from its menu: it floats from this frame on.
             if torn.is_some() || floating::group_of(&app.ui, id).is_some() {
                 return;
             }
+            crate::dancard_panels::set_body_height(ui.ctx(), id, sized.map(|_| tall));
             panel_body(app, ui, id, width, tall);
+            // DanCard fork: its left edge, bottom edge and bottom-left corner resize it; floated, it
+            // keeps the size it shows at.
+            let edges = ui.min_rect();
+            crate::dancard_panels::shown(ui.ctx(), id, edges.size());
+            resized = crate::dancard_panels::handles(ui, egui::Id::new(("dancard-flyout-size", id)), edges, true, max);
         });
     });
+    if let Some(size) = resized {
+        crate::dancard_panels::set_size(app, id, size);
+    }
     // User Interface › Auto-Collapse Iconic Panels (#394): a press away from the flyout puts it
     // away, on the canvas or a docked panel. Not one on the icon column (its icons swap or close the
     // flyout themselves, on release), nor one on a foreground layer (the flyout itself, a dialog, a palette) or a modal dialog's
@@ -419,7 +441,18 @@ pub(crate) fn panel_body(app: &mut VectorcraftApp, ui: &mut Ui, id: &str, width:
                 panels::layers::show(app, ui);
             }
             Some(DockTab::Libraries) => panels::libraries(app, ui),
-            None => panels::show_icon_panel(app, ui, id),
+            // DanCard fork: a panel sized by hand fits its height and scrolls (the DanCard panel
+            // scrolls its own body, `dancard_panels::body_height`).
+            None => match crate::dancard_panels::body_height(ui.ctx(), id).filter(|_| id != panels::dancard::ID) {
+                Some(h) => {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("dancard-sized-body", id))
+                        .max_height(h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| panels::show_icon_panel(app, ui, id));
+                }
+                None => panels::show_icon_panel(app, ui, id),
+            },
         }
     });
 }

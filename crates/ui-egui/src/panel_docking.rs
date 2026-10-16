@@ -506,13 +506,22 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
     fn body(&mut self, ui: &mut egui::Ui, panel: &String) {
         let width = ui.available_width();
         let height = (ui.available_height() - 20.0).max(0.0);
+        let area = ui.max_rect();
         if crate::state::DockTab::from_id(panel).is_some() {
+            crate::dock::panel_body(self.app, ui, panel, width, height);
+        } else if panel == crate::panels::dancard::ID {
+            // DanCard fork: the panel scrolls its own body, in all the height it is given.
+            crate::dancard_panels::set_body_height(ui.ctx(), panel, Some(ui.available_height()));
             crate::dock::panel_body(self.app, ui, panel, width, height);
         } else {
             egui::ScrollArea::vertical()
                 .id_salt(("shared-panel-body", panel))
                 .auto_shrink([false, false])
                 .show(ui, |ui| crate::dock::panel_body(self.app, ui, panel, width, height));
+        }
+        // DanCard fork: a floating window shows where its bottom-right corner resizes it.
+        if self.app.ui.docking.as_ref().is_some_and(|l| l.floating.iter().any(|g| g.panels.contains(panel))) {
+            crate::dancard_panels::paint_grip(ui, area.right_bottom(), false);
         }
     }
 

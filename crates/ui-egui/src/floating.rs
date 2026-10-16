@@ -302,7 +302,14 @@ pub(crate) fn tear(app: &mut VectorcraftApp, ctx: &egui::Context, ids: &[&'stati
     let Some(at) = ctx.input(|i| i.pointer.interact_pos()) else { return };
     let original = app.ui.clone();
     let pos = at - grab;
-    if let Err(error) = app.run("window.panel.float", json!({"panel":active,"group":ids.len() > 1,"x":pos.x,"y":pos.y})) {
+    // DanCard fork: the new floating window has the size the panel had (given by hand, or the
+    // panel's own), not the size every new floating window gets.
+    let mut params = json!({"panel":active,"group":ids.len() > 1,"x":pos.x,"y":pos.y});
+    if let Some(size) = crate::dancard_panels::float_size(app, ctx, active) {
+        params["width"] = json!(size.x);
+        params["height"] = json!(size.y);
+    }
+    if let Err(error) = app.run("window.panel.float", params) {
         app.ui.status = error;
         return;
     }
@@ -804,7 +811,17 @@ fn show_set(app: &mut VectorcraftApp, ctx: &egui::Context, set: &[usize], action
     // frame); the open panels of a set share that height.
     let n = groups.len() as f32;
     let open = groups.iter().filter(|g| !g.collapsed).count().max(1) as f32;
-    let tall = ((screen.bottom() - pos.y - TITLE - n * STRIP - (n - 1.0) * GAP - 60.0) / open).clamp(120.0, 560.0);
+    // DanCard fork: a size given by hand (`dancard_panels`), kept for the set's first panel.
+    let sized = crate::dancard_panels::size(app, first);
+    let max = vec2(screen.width() - 16.0, screen.bottom() - pos.y - 8.0);
+    let tall = match sized {
+        Some(s) => ((s.y.min(max.y) - TITLE - n * STRIP - (n - 1.0) * GAP) / open).max(80.0),
+        None => ((screen.bottom() - pos.y - TITLE - n * STRIP - (n - 1.0) * GAP - 60.0) / open).clamp(120.0, 560.0),
+    };
+    for g in &groups {
+        crate::dancard_panels::set_body_height(ctx, g.active, sized.map(|_| tall));
+    }
+    let mut resized = None;
     let lead_active = lead.active;
     egui::Area::new(area).order(egui::Order::Middle).fixed_pos(pos).show(ctx, |ui| {
         let frame = egui::Frame::popup(ui.style()).fill(t.panel).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::ZERO);
@@ -824,7 +841,12 @@ fn show_set(app: &mut VectorcraftApp, ctx: &egui::Context, set: &[usize], action
                     g.ids.iter().map(|id| dock::panel_width(id)).fold(tabs_width + 32.0, f32::max)
                 })
                 .fold(given.unwrap_or(0.0), f32::max);
+            // DanCard fork: the size given by hand, narrower than the panels' own too.
+            let width = sized.map_or(width, |s| s.x.min(max.x).max(crate::dancard_panels::MIN.x));
             ui.set_width(width);
+            if let Some(s) = sized {
+                ui.set_min_height(s.y.min(max.y));
+            }
             // Title bar: a grip that moves the set, and the × that docks it.
             let (bar, _) = ui.allocate_exact_size(vec2(width, TITLE), Sense::hover());
             ui.painter().rect_filled(bar, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.tab_strip);
@@ -845,8 +867,14 @@ fn show_set(app: &mut VectorcraftApp, ctx: &egui::Context, set: &[usize], action
             }
             let alone = (groups.len() == 1).then_some(pos);
             draw_groups(app, ui, &groups, width, tall, bar.top(), alone, action);
+            // DanCard fork: its right edge, bottom edge and bottom-right corner resize it.
+            let edges = ui.min_rect();
+            resized = crate::dancard_panels::handles(ui, Id::new(("dancard-float-size", first)), edges, false, max);
         });
     });
+    if let Some(size) = resized {
+        crate::dancard_panels::set_size(app, first, size);
+    }
 }
 
 /// Draw `groups` top to bottom, `width` wide, their open panels `tall`, the first one's bar having
@@ -1272,6 +1300,52 @@ mod tests {
         h.click(close);
         assert!(h.groups().is_empty());
         assert_eq!(h.dock_tabs().len(), 3);
+    }
+
+    /// DanCard fork: a popped-out panel resizes by its bottom-left corner (pinned by its right
+    /// edge) and keeps that size; dragged out by its title it floats at that size, and its floating
+    /// window resizes by its bottom-right corner.
+    #[test]
+    fn dancard_a_panel_resized_by_hand_floats_at_that_size() {
+        let mut h = Harness::new();
+        h.app.run("window.panel", json!({"panel": "dancard"})).unwrap();
+        // The popped-out panel as laid out once its size settles (its first frames size it).
+        let settled = |h: &mut Harness| {
+            let mut last = Rect::NOTHING;
+            for _ in 0..30 {
+                h.frame(vec![]);
+                let now = h.ctx.memory(|m| m.area_rect(Id::new("icon-panel"))).unwrap();
+                if now == last {
+                    return now;
+                }
+                last = now;
+            }
+            panic!("the popped-out panel keeps changing size: {last:?}")
+        };
+        let flyout = settled(&mut h);
+        let corner = pos2(flyout.left() + 5.0, flyout.bottom() - 5.0);
+        h.drag(corner, corner + vec2(-100.0, -80.0));
+        let sized = crate::dancard_panels::size(&h.app, "dancard").expect("a size given by hand");
+        let near = |a: f32, b: f32| (a - b).abs() <= 3.0;
+        assert!(near(sized.x, flyout.width() + 100.0) && near(sized.y, flyout.height() - 80.0), "{sized:?} from {flyout:?}");
+        let resized = settled(&mut h);
+        assert!(near(resized.width(), flyout.width() + 100.0) && near(resized.right(), flyout.right()), "{resized:?} from {flyout:?}");
+        assert!(near(resized.height(), flyout.height() - 80.0), "{resized:?} from {flyout:?}");
+        // Dragged out by its title, it floats at that size.
+        h.drag(resized.left_top() + vec2(20.0, 13.0), pos2(300.0, 200.0));
+        assert_eq!(h.app.ui.open_panel, None);
+        let rect = |h: &Harness| {
+            let layout = h.app.ui.docking.as_ref().expect("the shared docking");
+            layout.floating.iter().find(|g| g.panels.iter().any(|p| p == "dancard")).expect("floating").rect
+        };
+        let floated = rect(&h);
+        assert!(near(floated[2], sized.x) && near(floated[3], sized.y), "{floated:?} vs {sized:?}");
+        // Its window's bottom-right corner makes it larger.
+        let window = h.group("dancard");
+        let grip = window.right_bottom() - vec2(4.0, 4.0);
+        h.drag(grip, grip + vec2(80.0, 60.0));
+        let grown = rect(&h);
+        assert!(grown[2] > floated[2] + 40.0 && grown[3] > floated[3] + 30.0, "{grown:?} from {floated:?}");
     }
 
     #[test]

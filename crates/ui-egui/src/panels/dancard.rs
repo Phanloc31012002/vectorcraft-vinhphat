@@ -139,6 +139,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     variable::tick(app, ui.ctx());
     style::scope(ui, MARGIN, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
+        let top = ui.cursor().top();
         let tab = current_tab(app);
         header(app, ui, &tab);
         if let Some(key) = style::tab_bar(ui, TABS, &tab) {
@@ -147,7 +148,16 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         let tab = current_tab(app);
         // Phần thân cuộn được khi cao hơn cửa sổ (`.body` của DanCard); mỗi tab nhớ chỗ cuộn của nó
         // như mỗi tab của DanCard.
-        let max_h = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 48.0).max(160.0);
+        // Kéo cạnh bảng cho to nhỏ (`dancard_panels`): phần thân vừa chiều cao đó; không thì cao tới
+        // đáy cửa sổ.
+        let ready = UPDATE_READY.load(std::sync::atomic::Ordering::Relaxed);
+        let ready = (ready > BUILD.get().copied().unwrap_or(0)).then_some(ready);
+        // Chỗ cho dòng chân (và dòng báo bản mới, khi có).
+        let foot = if ready.is_some() { 64.0 } else { 40.0 };
+        let max_h = match crate::dancard_panels::body_height(ui.ctx(), ID) {
+            Some(h) => (top + h - 2.0 * MARGIN - ui.cursor().top() - foot).max(80.0),
+            None => (ui.ctx().content_rect().bottom() - ui.cursor().top() - foot - 8.0).max(160.0),
+        };
         egui::ScrollArea::vertical().id_salt(("dancard-body", tab.as_str())).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.add_space(4.0);
@@ -165,8 +175,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             }
             ui.add_space(4.0);
         });
-        let ready = UPDATE_READY.load(std::sync::atomic::Ordering::Relaxed);
-        if ready > BUILD.get().copied().unwrap_or(0) {
+        if let Some(ready) = ready {
             style::hint_strong(ui, &format!("Đã tải bản {ready}: đóng rồi mở lại app là dùng bản mới."));
         }
         style::footer(ui, &foot_text());

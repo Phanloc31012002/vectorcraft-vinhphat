@@ -23,6 +23,8 @@ pub mod control;
 pub mod credits;
 pub mod cursors;
 pub mod dialogs;
+// DanCard fork: panels resized by hand (popped-out panels, floating groups).
+mod dancard_panels;
 pub mod dock;
 mod edit_toolbar;
 pub mod find_font;
