@@ -438,6 +438,7 @@ mod tests {
             h: 200,
             outline: false,
             trim: false,
+            templates: true,
             ppp: 1.0,
             hidden: vec![],
             rot: 0.0,
@@ -459,6 +460,7 @@ mod tests {
         assert_eq!(art(&k), art(&panned));
         assert_ne!(art(&k), art(&CacheKey { revision: 5, ..k.clone() }));
         assert_ne!(art(&k), art(&CacheKey { outline: true, ..k.clone() }));
+        assert_ne!(art(&k), art(&CacheKey { templates: false, ..k.clone() }), "View › Hide Template");
     }
 
     /// A heavy document: the backdrop is rendered once the art has settled, a tile at a time while
