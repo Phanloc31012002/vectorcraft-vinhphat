@@ -62,6 +62,12 @@ try {
   Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force
   $exe = Get-ChildItem -LiteralPath $unpack -Filter 'vectorcraft.exe' -Recurse | Select-Object -First 1
   if (-not $exe) { throw 'Trong file tai ve khong co vectorcraft.exe' }
+  # Bản gốc VectorCraft bật chế độ portable bằng portable.txt cạnh exe (cài đặt để trong thư mục app):
+  # bản cài cho xưởng giữ cài đặt trong AppData, vì mỗi lần cập nhật thay cả thư mục app.
+  foreach ($marker in 'portable.txt', 'VectorCraft.portable') {
+    $file = Join-Path $exe.DirectoryName $marker
+    if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+  }
   # Bản đang cài sang một bên trước, bản mới vào chỗ, rồi mới xóa bản cũ: hỏng giữa chừng thì bản cũ
   # quay lại, máy không bao giờ mất app.
   $prev = Join-Path $root 'app.prev'

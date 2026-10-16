@@ -426,6 +426,24 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// The files that switch on upstream's portable mode beside the exe (`profile::PORTABLE_MARKERS`,
+/// in `prefs_dir`): its portable zip, which this fork's releases are, carries `portable.txt`. An
+/// install of the fork keeps its settings in the user's settings folder instead: each update
+/// replaces the app's folder, and a `VectorCraftData` folder in it would go with it.
+const PORTABLE_MARKERS: [&str; 2] = ["portable.txt", "VectorCraft.portable"];
+
+/// Take upstream's portable-mode markers ([`PORTABLE_MARKERS`]) out of the build in `dir`.
+fn drop_portable_markers(dir: &Path) -> Result<(), String> {
+    for marker in PORTABLE_MARKERS {
+        let path = dir.join(marker);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("{}: {e}", path.display())),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// The folder holding the app's exe in `unpacked`: itself, or a folder in it (the zip keeps the
 /// files in a folder named after the version).
 fn find_app_dir(unpacked: &Path) -> Option<PathBuf> {
@@ -521,6 +539,7 @@ fn fetch(update: &Path, release: &Release) -> Result<(), (bool, String)> {
             return Err(format!("tar: {status}"));
         }
         let found = find_app_dir(&unpacked).ok_or_else(|| format!("build {}: no {EXE} in its zip", release.build))?;
+        drop_portable_markers(&found).map_err(|e| format!("build {}: {e}", release.build))?;
         // On the disk before it is marked ready: a power cut must not leave a build of empty files.
         sync_files(&found).map_err(|e| format!("build {}: {e}", release.build))?;
         runs_as(&found.join(EXE), release.build)?;
@@ -1391,6 +1410,24 @@ mod tests {
         assert_eq!(find_app_dir(&dir), Some(inner.clone()));
         std::fs::write(dir.join(EXE), "exe").unwrap();
         assert_eq!(find_app_dir(&dir), Some(dir.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Upstream's portable zip switches on portable mode with a file beside the exe: a build taken
+    /// in has none, so its settings stay in the user's folder; the list follows upstream's.
+    #[test]
+    fn a_build_taken_in_runs_without_upstreams_portable_mode() {
+        let dir = temp("portable");
+        for m in PORTABLE_MARKERS {
+            std::fs::write(dir.join(m), "x").unwrap();
+        }
+        std::fs::write(dir.join(EXE), "exe").unwrap();
+        drop_portable_markers(&dir).unwrap();
+        assert!(PORTABLE_MARKERS.iter().all(|m| !dir.join(m).exists()));
+        assert!(dir.join(EXE).is_file(), "the app stays");
+        drop_portable_markers(&dir).unwrap();
+        let [a, b] = PORTABLE_MARKERS;
+        assert!(include_str!("profile.rs").contains(&format!("pub const PORTABLE_MARKERS: [&str; 2] = [\"{a}\", \"{b}\"];")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

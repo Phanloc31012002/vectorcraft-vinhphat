@@ -70,12 +70,18 @@ jobs:
           $msi = Get-ChildItem dist/release/*.msi | Select-Object -First 1
           if (-not $zip -or -not $msi) { throw 'no portable zip or msi in dist/release' }
           New-Item -ItemType Directory -Force publish/files | Out-Null
-          Copy-Item $zip.FullName publish/files/CongCuBinh-windows-x64.zip
+          # Zip portable của bản gốc bật chế độ portable (portable.txt cạnh exe: cài đặt nằm trong thư
+          # mục app). Bản cài cho xưởng giữ cài đặt trong AppData, vì mỗi lần cập nhật thay cả thư mục
+          # app; bộ cập nhật của các bản trước lấy zip như nó có, nên bỏ file đó ngay trong zip.
+          Expand-Archive $zip.FullName -DestinationPath repack
+          Get-ChildItem repack -Recurse -Include portable.txt, VectorCraft.portable | Remove-Item -Force
+          Compress-Archive -Path repack/* -DestinationPath publish/files/CongCuBinh-windows-x64.zip
           Copy-Item $msi.FullName publish/files/
           Copy-Item packaging/dancard/CaiDat-CongCuBinh.cmd publish/files/
           # Thử đúng file sẽ đăng: app trong zip chạy được và mang số bản này (không có số bản thì
           # các máy cài sẽ không bao giờ tự cập nhật).
           Expand-Archive publish/files/CongCuBinh-windows-x64.zip -DestinationPath smoke
+          if (Get-ChildItem smoke -Recurse -Include portable.txt, VectorCraft.portable) { throw 'the zip would switch on portable mode' }
           $exe = Get-ChildItem smoke -Recurse -Filter vectorcraft.exe | Select-Object -First 1
           if (-not $exe) { throw 'no vectorcraft.exe in the portable zip' }
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '--version' -Wait -PassThru -NoNewWindow -RedirectStandardOutput smoke-version.txt
