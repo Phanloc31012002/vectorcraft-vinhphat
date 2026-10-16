@@ -1,8 +1,9 @@
 //! DanCard — tab Variable: xuất mỗi bản ghi (data set) thành một file, như Batch của bảng Actions
 //! với nguồn Data Sets trên Illustrator (bảng Actions của VectorCraft chưa có bước này).
 //!
-//! - Mỗi bản ghi được áp lên một **bản sao** của tài liệu, như `dataset.select` áp (chữ, ẩn/hiện;
-//!   object bị khóa hay nằm trong layer ẩn/khóa giữ nguyên), rồi cả các artboard lưu thành một file:
+//! - Mỗi bản ghi được áp lên một **bản sao** của tài liệu, như `dataset.select` áp (chữ, ẩn/hiện,
+//!   ảnh, biểu đồ; object bị khóa hay nằm trong layer ẩn/khóa giữ nguyên), rồi cả các artboard lưu
+//!   thành một file:
 //!   PDF (nhiều trang khi nhiều artboard, cùng thiết lập với PDF của tab Dàn theo mẫu) hoặc `.ai`
 //!   (sửa tiếp được, kèm phần PDF như file AI của tab CTL Offset). Tài liệu đang mở không đổi,
 //!   không thêm bước hoàn tác.
@@ -124,14 +125,32 @@ fn file_names(sets: &[DataSet], prefix: &str, format: Format) -> Vec<String> {
 }
 
 /// Bản ghi `ds` áp lên tài liệu `d` như `dataset.select` (chữ thay bằng giá trị của bản ghi, ẩn/hiện
-/// theo bản ghi; object bị khóa, nằm trong layer ẩn/khóa, hay giá trị không hợp loại biến thì giữ
-/// nguyên) → (số chỗ đã áp, số chỗ bỏ qua).
+/// theo bản ghi, ảnh đổi file giữ khung, biểu đồ đổi số liệu; object bị khóa, nằm trong layer
+/// ẩn/khóa, hay giá trị không hợp loại biến thì giữ nguyên) → (số chỗ đã áp, số chỗ bỏ qua).
 fn apply_record(d: &mut Document, ds: &DataSet) -> (usize, usize) {
     // Biến theo thứ tự định nghĩa: object gắn hai biến chữ lấy giá trị của biến sau, như dataset.select.
     let mut pairs: Vec<(NodeId, String)> = vec![];
     for v in &d.variables.variables {
         pairs.extend(d.variables.objects_of(&v.name).into_iter().map(|id| (id, v.name.clone())));
     }
+    // Ba lượt như dataset.select: giá trị hiện object (object ngoài trước), các giá trị khác, rồi
+    // giá trị ẩn object (object trong trước).
+    let mut shows = std::collections::HashMap::new();
+    for (id, var) in &pairs {
+        let kind = d.variables.variable(var).map(|v| v.kind);
+        if let (Some(VariableKind::Visibility), Some(DataValue::Visible(show))) = (kind, ds.values.get(var)) {
+            shows.insert(*id, *show);
+        }
+    }
+    let depths = d.index_paths(shows.keys().copied());
+    pairs.sort_by_cached_key(|(id, var)| {
+        let depth = depths.get(id).map_or(0, Vec::len);
+        match (d.variables.variable(var).map(|v| v.kind), shows.get(id)) {
+            (Some(VariableKind::Visibility), Some(true)) => (0, depth),
+            (Some(VariableKind::Visibility), Some(false)) => (2, usize::MAX - depth),
+            _ => (1, 0),
+        }
+    });
     let (mut applied, mut skipped) = (0, 0);
     for (id, var) in pairs {
         let kind = d.variables.variable(&var).map(|v| v.kind);
@@ -149,6 +168,8 @@ fn apply_record(d: &mut Document, ds: &DataSet) -> (usize, usize) {
                 n.visible = *show;
                 true
             }),
+            (VariableKind::Image, DataValue::Image(path)) => crate::cmd::links::set_image_from_path(d, id, path).is_ok(),
+            (VariableKind::Graph, DataValue::Graph(csv)) => crate::cmd::graph::apply_csv(d, id, csv).is_ok(),
             _ => false,
         };
         if done {

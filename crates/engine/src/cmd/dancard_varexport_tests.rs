@@ -69,6 +69,27 @@ fn listing(d: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
+fn ban_ghi_doi_anh_nhu_dataset_select() {
+    use crate::tests_links::{BLUE, Folder, RED, image, place, png, write};
+    let dir = Folder::new("dancard-varexport-anh");
+    let (red, blue) = (dir.file("do.png"), dir.file("xanh.png"));
+    write(&red, &png(40, 30, RED));
+    write(&blue, &png(80, 60, BLUE));
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width": 300, "height": 200}));
+    let anh = place(&mut s, &red);
+    run(&mut s, "object.setProps", json!({"id": anh.0, "name": "Anh"}));
+    run(&mut s, "dancard.importVariables", json!({"text": format!("@Anh\n{red}\n{blue}\n")}));
+    let doc = (*s.doc().unwrap().doc).clone();
+    let mut d = doc.clone();
+    assert_eq!(apply_record(&mut d, &doc.variables.datasets[1]), (1, 0));
+    let NodeKind::Image(im) = &d.node(anh).unwrap().kind else { panic!("không phải ảnh") };
+    assert_eq!(im.link.as_ref().map(|l| l.path.as_str()), Some(blue.as_str()));
+    // Tài liệu đang mở vẫn hiện bản ghi 1.
+    assert_eq!(image(&s, anh).link.map(|l| l.path), Some(red));
+}
+
+#[test]
 fn ten_file_sach_khong_trung_va_on_dinh() {
     let set = |name: &str| DataSet { name: name.into(), ..Default::default() };
     let sets = [set("A/B"), set("a-b"), set("con"), set("Lộc: 01?"), set("..."), set("A-B")];

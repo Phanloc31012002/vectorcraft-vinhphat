@@ -133,13 +133,14 @@ fn bien_theo_dong_tieu_de() {
         [
             ("Ten", VariableKind::Text, 0),
             ("Hien", VariableKind::Visibility, 1),
+            ("Anh", VariableKind::Image, 2),
             ("Ten 2", VariableKind::Text, 4),
             ("Variable6", VariableKind::Text, 5),
             ("Họ tên", VariableKind::Text, 6),
         ]
     );
-    // @ và % bỏ qua, một tên trùng, một tên trống.
-    assert_eq!(w.len(), 4, "{w:?}");
+    // % bỏ qua, một tên trùng, một tên trống.
+    assert_eq!(w.len(), 3, "{w:?}");
     // Không có dòng tiêu đề: Variable1…, đều là chữ.
     let cols = columns(&Table::new(&g, false), false, &mut Vec::new());
     let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
@@ -276,13 +277,38 @@ fn chuyen_hang_cot_va_dau_xuong_dong() {
 }
 
 #[test]
+fn cot_anh_doi_file_anh_theo_ban_ghi() {
+    use crate::tests_links::{BLUE, Folder, RED, image, place, png, write};
+    let dir = Folder::new("dancard-var-anh");
+    let (red, blue) = (dir.file("do.png"), dir.file("xanh.png"));
+    write(&red, &png(40, 30, RED));
+    write(&blue, &png(80, 60, BLUE));
+    let mut s = session();
+    let anh = place(&mut s, &red);
+    run(&mut s, "object.setProps", json!({"id": anh.0, "name": "Anh"}));
+    // Chữ trùng tên biến ảnh: không gắn, có cảnh báo.
+    text(&mut s, "x", "Anh");
+    // Đường dẫn tương đối tính từ thư mục file dữ liệu; ô trống giữ ảnh như cũ.
+    let csv = dir.file("du lieu.csv");
+    write(&csv, "Ten,@Anh\nAn,xanh.png\nBình,\n".as_bytes());
+    let v = run(&mut s, "dancard.importVariables", json!({"path": csv}));
+    assert_eq!(v["variables"][1], json!({"name": "Anh", "kind": "image", "column": 2, "bound": 1}), "{v}");
+    assert!(warned(&v, "không phải ảnh"), "{v}");
+    let link = |s: &Session| image(s, anh).link.map(|l| l.path);
+    assert_eq!(link(&s), Some(blue.clone()), "bản ghi 1 đổi ảnh");
+    assert!(!s.doc().unwrap().doc.variables.datasets[1].values.contains_key("Anh"), "ô trống không có giá trị");
+    run(&mut s, "dataset.next", json!({}));
+    assert_eq!(link(&s), Some(blue), "bản ghi 2 giữ ảnh");
+}
+
+#[test]
 fn loi_ro_rang_khong_sap() {
     let mut s = session();
     for p in [
         json!({}),
         json!({"text": ""}),
         json!({"text": "\n,,\n"}),
-        json!({"text": "@Anh,%BieuDo\nx.png,y.csv"}),
+        json!({"text": "%BieuDo\ny.csv"}),
         json!({"text": "a", "delimiter": "pipe"}),
         json!({"text": "a", "bindBy": "tag"}),
         json!({"text": "a\n1", "datasetNames": "b"}),

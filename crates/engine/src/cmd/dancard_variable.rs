@@ -11,11 +11,13 @@
 //! - ô trong ngoặc kép giữ được dấu phân cách, xuống dòng và `""`; dòng trống bị bỏ, dòng ngắn
 //!   được đệm ô trống, ô thừa của dòng dài bị bỏ (kèm cảnh báo);
 //! - tên cột bắt đầu bằng `#` là biến ẩn/hiện (true/on hiện, false/off/trống ẩn, chữ khác hiện);
-//!   `@` (ảnh) và `%` (biểu đồ) VectorCraft chưa có nên cột bị bỏ qua kèm cảnh báo;
+//!   `@` là biến ảnh (đường dẫn file ảnh; tương đối thì tính từ thư mục file dữ liệu; ô trống giữ
+//!   ảnh như cũ), gắn object ảnh; `%` (biểu đồ) chưa nhận nên cột bị bỏ qua kèm cảnh báo;
 //! - tên biến giữ nguyên chữ của dòng tiêu đề (có dấu, có khoảng trắng), chỉ đặt lại tên trống
 //!   hoặc trùng; bản ghi tên Record-1, Record-2… hoặc theo một cột (trùng/trống thì Record 1…);
 //! - gắn object theo tên (hoặc ghi chú Attributes) trùng tên biến, ở mọi tầng group, không tính
-//!   layer; biến chữ chỉ gắn object chữ; object bị khóa hoặc nằm trong layer ẩn/khóa được bỏ qua
+//!   layer; biến chữ chỉ gắn object chữ, biến ảnh chỉ gắn object ảnh; object bị khóa hoặc nằm
+//!   trong layer ẩn/khóa được bỏ qua
 //!   và báo lại;
 //! - thay toàn bộ biến, bản ghi và liên kết cũ, rồi hiện bản ghi 1 (`dataset.select`).
 //!
@@ -58,7 +60,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         "DanCard: Nhập dữ liệu Variable",
         [],
         None,
-        "{path?: (file .csv hoặc .txt; bản web không đọc được đường dẫn), text?: (nội dung file thay cho path; cho web và MCP), delimiter?: auto|comma|semicolon|tab (auto: .txt là Tab; .csv là dấu phẩy hoặc chấm phẩy khi dòng đầu chỉ có chấm phẩy; text không tên file thì theo dấu dòng đầu dùng nhiều nhất), headers?: bool (dòng đầu là tên biến; mặc định true; false thì Variable1…), transpose?: bool (đảo hàng và cột: cột đầu là tên biến), bindBy?: name|note|none (gắn object có tên hoặc ghi chú Attributes trùng tên biến ở mọi tầng group, không tính layer; none: giữ các liên kết cũ của biến cùng tên cùng loại; mặc định name), datasetNames?: (tên hoặc số thứ tự cột đặt tên bản ghi; mặc định Record-1…; trùng hoặc trống thì Record 1…), backslashBreak?: bool (hai dấu \\\\ trong ô là xuống dòng), dryRun?: bool (chỉ báo trước, không đổi tài liệu)} nhập file dữ liệu thành Variables: mỗi cột một biến (chữ; tên cột bắt đầu bằng # là biến ẩn/hiện; @ ảnh và % biểu đồ chưa có nên bỏ qua kèm cảnh báo), mỗi dòng một bản ghi; chuẩn hoá NFC tiếng Việt; thay toàn bộ biến và bản ghi cũ, gắn object rồi hiện bản ghi 1, một bước hoàn tác → {message, variables: [{name, kind, column, bound}], datasets: [tên], bound, applied?, skipped?, warnings, dryRun, delimiter, encoding}",
+        "{path?: (file .csv hoặc .txt; bản web không đọc được đường dẫn), text?: (nội dung file thay cho path; cho web và MCP), delimiter?: auto|comma|semicolon|tab (auto: .txt là Tab; .csv là dấu phẩy hoặc chấm phẩy khi dòng đầu chỉ có chấm phẩy; text không tên file thì theo dấu dòng đầu dùng nhiều nhất), headers?: bool (dòng đầu là tên biến; mặc định true; false thì Variable1…), transpose?: bool (đảo hàng và cột: cột đầu là tên biến), bindBy?: name|note|none (gắn object có tên hoặc ghi chú Attributes trùng tên biến ở mọi tầng group, không tính layer; none: giữ các liên kết cũ của biến cùng tên cùng loại; mặc định name), datasetNames?: (tên hoặc số thứ tự cột đặt tên bản ghi; mặc định Record-1…; trùng hoặc trống thì Record 1…), backslashBreak?: bool (hai dấu \\\\ trong ô là xuống dòng), dryRun?: bool (chỉ báo trước, không đổi tài liệu)} nhập file dữ liệu thành Variables: mỗi cột một biến (chữ; tên cột bắt đầu bằng # là biến ẩn/hiện, @ là biến ảnh: đường dẫn file ảnh, tương đối thì tính từ thư mục file dữ liệu; % biểu đồ chưa nhận nên bỏ qua kèm cảnh báo), mỗi dòng một bản ghi; chuẩn hoá NFC tiếng Việt; thay toàn bộ biến và bản ghi cũ, gắn object rồi hiện bản ghi 1, một bước hoàn tác → {message, variables: [{name, kind, column, bound}], datasets: [tên], bound, applied?, skipped?, warnings, dryRun, delimiter, encoding}",
         has_doc,
         import_variables
     )]
@@ -85,6 +87,8 @@ struct Options {
     dataset_names: Option<String>,
     backslash_break: bool,
     dry_run: bool,
+    /// Thư mục của file dữ liệu: đường dẫn ảnh tương đối tính từ đây.
+    base: Option<std::path::PathBuf>,
 }
 
 fn other(msg: impl Into<String>) -> EngineError {
@@ -120,6 +124,7 @@ fn options(p: &Value) -> Result<Options> {
         dataset_names,
         backslash_break: bool_or(p, "backslashBreak", false),
         dry_run: bool_or(p, "dryRun", false),
+        base: None,
     })
 }
 
@@ -601,7 +606,7 @@ struct Column {
     kind: VariableKind,
 }
 
-/// Các biến theo dòng tiêu đề: `#` ẩn/hiện, còn lại chữ; `@` và `%` bỏ qua. Tên giữ nguyên chữ
+/// Các biến theo dòng tiêu đề: `#` ẩn/hiện, `@` ảnh, còn lại chữ; `%` (biểu đồ) bỏ qua. Tên giữ nguyên chữ
 /// (đã NFC, cắt khoảng trắng hai đầu); tên trống thành `VariableN`, tên trùng thêm số. Không có
 /// tiêu đề: `Variable1…`, đều là chữ.
 fn columns(table: &Table, headers: bool, warnings: &mut Vec<String>) -> Vec<Column> {
@@ -617,11 +622,10 @@ fn columns(table: &Table, headers: bool, warnings: &mut Vec<String>) -> Vec<Colu
             let h = table.cell(0, i);
             if let Some(rest) = h.strip_prefix('#') {
                 (rest, VariableKind::Visibility)
-            } else if h.starts_with('@') {
-                warnings.push(format!("Bỏ qua cột {n} “{}”: VectorCraft chưa có biến ảnh (Image).", h.trim()));
-                continue;
+            } else if let Some(rest) = h.strip_prefix('@') {
+                (rest, VariableKind::Image)
             } else if h.starts_with('%') {
-                warnings.push(format!("Bỏ qua cột {n} “{}”: VectorCraft chưa có biến biểu đồ (Graph).", h.trim()));
+                warnings.push(format!("Bỏ qua cột {n} “{}”: DanCard chưa nhận cột biểu đồ (Graph).", h.trim()));
                 continue;
             } else {
                 (h, VariableKind::Text)
@@ -745,18 +749,35 @@ fn datasets(table: &Table, columns: &[Column], o: &Options, warnings: &mut Vec<S
             let r = start + k;
             let values: BTreeMap<String, DataValue> = columns
                 .iter()
-                .map(|c| {
+                .filter_map(|c| {
                     let cell = table.cell(r, c.index);
                     let value = match c.kind {
                         VariableKind::Text => DataValue::Text(text_value(cell, o.backslash_break)),
                         VariableKind::Visibility => DataValue::Visible(visible(cell)),
+                        VariableKind::Image => DataValue::Image(image_path(cell, o.base.as_deref())?),
+                        // `columns` makes none.
+                        VariableKind::Graph => return None,
                     };
-                    (c.name.clone(), value)
+                    Some((c.name.clone(), value))
                 })
                 .collect();
             DataSet { name, values }
         })
         .collect())
+}
+
+/// Đường dẫn file ảnh trong ô của biến ảnh (bỏ khoảng trắng và ngoặc kép hai đầu): tương đối thì
+/// tính từ thư mục file dữ liệu `base`. Ô trống: không có giá trị, ảnh của bản ghi đó giữ như cũ.
+fn image_path(cell: &str, base: Option<&std::path::Path>) -> Option<String> {
+    let t = cell.trim().trim_matches('"').trim();
+    if t.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(t);
+    match base {
+        Some(base) if !path.is_absolute() => Some(base.join(path).to_string_lossy().into_owned()),
+        _ => Some(t.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------- tìm object để gắn
@@ -772,6 +793,8 @@ struct Art {
     locked: Vec<String>,
     /// Trùng tên một biến chữ nhưng không phải object chữ.
     not_type: Vec<String>,
+    /// Trùng tên một biến ảnh nhưng không phải object ảnh.
+    not_image: Vec<String>,
 }
 
 /// Mọi object của tài liệu ở mọi tầng group (kể cả trong clip group), không tính layer. Bên
@@ -831,6 +854,10 @@ fn find_art(d: &Document, columns: &[Column], by: BindBy) -> Art {
             art.not_type.push(key);
             continue;
         }
+        if column.kind == VariableKind::Image && !matches!(n.kind, NodeKind::Image(_)) {
+            art.not_image.push(key);
+            continue;
+        }
         if !d.variable_target(n.id) {
             art.locked.push(key);
             continue;
@@ -874,8 +901,8 @@ fn commit(s: &mut Session, columns: &[Column], datasets: Vec<DataSet>, pairs: &[
 
 /// Câu báo khi không gắn được object nào.
 fn nothing_bound(by: BindBy, columns: &[Column], art: &Art) -> String {
-    if !art.locked.is_empty() || !art.not_type.is_empty() {
-        return " Chưa gắn được object nào: các object trùng tên đều bị khóa, nằm trong layer ẩn/khóa hoặc không phải chữ (xem cảnh báo).".into();
+    if !art.locked.is_empty() || !art.not_type.is_empty() || !art.not_image.is_empty() {
+        return " Chưa gắn được object nào: các object trùng tên đều bị khóa, nằm trong layer ẩn/khóa hoặc không đúng loại (biến chữ gắn object chữ, biến ảnh gắn object ảnh; xem cảnh báo).".into();
     }
     let wanted = listed(columns.iter().map(|c| c.name.as_str()));
     match by {
@@ -890,9 +917,10 @@ fn nothing_bound(by: BindBy, columns: &[Column], art: &Art) -> String {
 }
 
 fn import_variables(s: &mut Session, p: &Value) -> Result<Value> {
-    let o = options(p)?;
+    let mut o = options(p)?;
     let mut warnings: Vec<String> = Vec::new();
     let path = str_param(p, "path").map(str::trim).filter(|v| !v.is_empty());
+    o.base = path.and_then(|f| std::path::Path::new(f).parent()).map(std::path::Path::to_path_buf);
     let (text, encoding) = read_source(p, path, &mut warnings)?;
     let ext = path.and_then(|f| std::path::Path::new(f).extension()).and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     let delim = pick_delimiter(o.delimiter, ext.as_deref(), &text)?;
@@ -914,7 +942,7 @@ fn import_variables(s: &mut Session, p: &Value) -> Result<Value> {
     let columns = columns(&table, o.headers, &mut warnings);
     if columns.is_empty() {
         let why = if warnings.is_empty() { String::new() } else { format!(" {}", warnings.join(" ")) };
-        return Err(other(format!("Không có biến nào để nhập (VectorCraft có biến chữ và biến ẩn/hiện).{why}")));
+        return Err(other(format!("Không có biến nào để nhập (DanCard nhận biến chữ, ẩn/hiện và ảnh).{why}")));
     }
     let datasets = datasets(&table, &columns, &o, &mut warnings)?;
     let names: Vec<String> = datasets.iter().map(|d| d.name.clone()).collect();
@@ -933,6 +961,13 @@ fn import_variables(s: &mut Session, p: &Value) -> Result<Value> {
             "{} object trùng tên biến chữ nhưng không phải chữ (Type) nên không gắn: {}.",
             art.not_type.len(),
             listed(art.not_type.iter().map(String::as_str))
+        ));
+    }
+    if !art.not_image.is_empty() {
+        warnings.push(format!(
+            "{} object trùng tên biến ảnh nhưng không phải ảnh nên không gắn: {}.",
+            art.not_image.len(),
+            listed(art.not_image.iter().map(String::as_str))
         ));
     }
     let bound = art.pairs.len();
