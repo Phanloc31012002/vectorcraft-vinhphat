@@ -1,0 +1,2 @@
+# Bộ cài chạy bằng cmd.exe: giữ nguyên CRLF, git không đổi xuống dòng.
+*.cmd -text

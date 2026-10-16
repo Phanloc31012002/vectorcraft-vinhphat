@@ -2,6 +2,12 @@
 # Chạy tay ở tab Actions (Run workflow) hoặc tự chạy khi push lên nhánh `dancard`.
 # Kết quả: artifact `dancard-vectorcraft-windows-x64` chứa vectorcraft-<ver>-windows-x64-portable.zip
 # (vectorcraft.exe + vectorcraft-cli.exe) và bản cài .msi, chưa ký số (fork không có chứng chỉ).
+# Build trên nhánh `dancard` còn được đăng lên Releases (tag dancard-b<số lần chạy>, đánh dấu
+# Latest), sau khi thử app trong zip chạy được và mang đúng số bản: CongCuBinh-windows-x64.zip,
+# .msi, latest.json (số bản, địa chỉ zip, SHA-256) và CaiDat-CongCuBinh.cmd. App cài bằng file đó
+# (AppData của từng máy) tự tải bản mới từ đây (apps/vectorcraft/src/dancard_update.rs); số bản là
+# số lần chạy của workflow này (DANCARD_BUILD). Đừng đổi tên file này: số lần chạy sẽ đếm lại từ 1,
+# nhỏ hơn bản các máy đang có, nên không máy nào nhận bản mới nữa.
 # Các bước chép từ job `windows` của release.yml upstream, bỏ phần ký số và font CJK.
 name: DanCard Windows x64
 
@@ -17,6 +23,8 @@ jobs:
   windows-x64:
     runs-on: windows-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -32,12 +40,57 @@ jobs:
           wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
       - name: Build and package (unsigned)
         shell: pwsh
+        env:
+          # Số bản cho bộ tự cập nhật (chỉ crate app đọc, các crate khác không build lại).
+          DANCARD_BUILD: ${{ github.run_number }}
         run: ./packaging/windows/package.ps1 -Arch x64
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dancard-vectorcraft-windows-x64
           path: dist/release/*
           if-no-files-found: error
+      - name: Đăng lên Releases (bản cho các máy tự cập nhật)
+        if: github.ref == 'refs/heads/dancard'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          # Tiếng Việt trong tiêu đề commit (git in ra UTF-8) đọc đúng.
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+          $tag = "dancard-b$env:BUILD"
+          $zip = Get-ChildItem dist/release/*-portable.zip | Select-Object -First 1
+          $msi = Get-ChildItem dist/release/*.msi | Select-Object -First 1
+          if (-not $zip -or -not $msi) { throw 'no portable zip or msi in dist/release' }
+          Copy-Item $zip.FullName CongCuBinh-windows-x64.zip
+          # Thử đúng file sẽ đăng: app trong zip chạy được và mang số bản này (không có số bản thì
+          # các máy cài sẽ không bao giờ tự cập nhật).
+          Expand-Archive CongCuBinh-windows-x64.zip -DestinationPath smoke
+          $exe = Get-ChildItem smoke -Recurse -Filter vectorcraft.exe | Select-Object -First 1
+          if (-not $exe) { throw 'no vectorcraft.exe in the portable zip' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--version' -Wait -PassThru -NoNewWindow -RedirectStandardOutput smoke-version.txt
+          $version = "$(Get-Content smoke-version.txt -Raw)".Trim()
+          if ($p.ExitCode -ne 0 -or $version -notmatch "\(DanCard build $env:BUILD\)$") { throw "vectorcraft.exe --version: exit $($p.ExitCode), '$version'" }
+          Write-Output "ok $version"
+          $sha = (Get-FileHash CongCuBinh-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            build  = [int64]$env:BUILD
+            commit = $env:GITHUB_SHA
+            url    = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/CongCuBinh-windows-x64.zip"
+            sha256 = $sha
+          } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM latest.json
+          Copy-Item packaging/dancard/CaiDat-CongCuBinh.cmd .
+          $files = @('CongCuBinh-windows-x64.zip', $msi.FullName, 'latest.json', 'CaiDat-CongCuBinh.cmd')
+          # Chạy lại (Re-run) một lần chạy đã đăng: cùng số bản, chỉ thay các file.
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber @files
+          } else {
+            $notes = "$(git log -1 --format=%s $env:GITHUB_SHA)`n`nCài lần đầu: tải CaiDat-CongCuBinh.cmd rồi bấm đúp. Máy đã cài tự lên bản này."
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --latest `
+              --title "Công cụ bình bản $env:BUILD (alpha)" --notes $notes @files
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }
 
   # Bản web (wasm) của VectorCraft: các lệnh DanCard không được làm hỏng (`cargo xtask wasm` của upstream).
   wasm-check:

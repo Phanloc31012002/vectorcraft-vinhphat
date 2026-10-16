@@ -83,22 +83,13 @@ pub fn start(dir: &Path, files: &[String]) -> Start {
         log::warn!("single instance: no settings folder ({e}): this window opens on its own");
         return Start::Window;
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(false).write(true);
-    // This user's alone: another user holding the lock would keep every launch waiting.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let lock = match options.open(dir.join(LOCK_FILE)) {
+    let lock = match open_lock(dir) {
         Ok(f) => f,
         Err(e) => {
             log::warn!("single instance: can't open {LOCK_FILE} ({e}): this window opens on its own");
             return Start::Window;
         }
     };
-    // A lock file left by an earlier version keeps its permissions on open. Not fatal: it only
-    // matters when another user tries to hold it.
-    #[cfg(unix)]
-    let _ = lock.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600));
     let files = absolute(files);
     let nonce = token();
     let deadline = now_ms().saturating_add(HANDOVER_MS);
@@ -143,6 +134,32 @@ pub fn start(dir: &Path, files: &[String]) -> Start {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The lock file in `dir`, this user's alone (another user holding it would keep every launch
+/// waiting).
+fn open_lock(dir: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let lock = options.open(dir.join(LOCK_FILE))?;
+    // A lock file left by an earlier version keeps its permissions on open. Not fatal: it only
+    // matters when another user tries to hold it.
+    #[cfg(unix)]
+    let _ = lock.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    Ok(lock)
+}
+
+/// Run `f` holding the lock in `dir` when no window of the app runs (`None` when one does): an
+/// update replaces the app's files only then (`dancard_update`).
+pub fn alone<R>(dir: &Path, f: impl FnOnce() -> R) -> Option<R> {
+    std::fs::create_dir_all(dir).ok()?;
+    let lock = open_lock(dir).ok()?;
+    lock.try_lock().ok()?;
+    let out = f();
+    drop(lock);
+    Some(out)
 }
 
 /// Wake `ctx` when files arrive while the app runs.

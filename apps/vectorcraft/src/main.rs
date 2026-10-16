@@ -30,6 +30,8 @@ mod clipboard;
 #[cfg(feature = "wgpu")]
 mod compositor_gpu;
 mod control_server;
+#[cfg(not(target_os = "macos"))]
+mod dancard_update;
 #[cfg(feature = "wgpu")]
 mod gpu;
 mod logging;
@@ -164,6 +166,12 @@ impl App {
             if !files.is_empty() {
                 open_files(&mut self.app, files);
             }
+        }
+        // The DanCard fork's updates (`dancard_update`): the first frame ends a new build's trial;
+        // a newer build downloaded, a new build in place, a roll-back are said once.
+        #[cfg(not(target_os = "macos"))]
+        if let Some(notice) = dancard_update::on_frame(ctx) {
+            self.app.status(notice);
         }
         self.app.logic(ctx);
         window::track(ctx, &mut self.app.ui.window);
@@ -664,7 +672,13 @@ fn main() -> std::process::ExitCode {
             "--in-window-menus" => in_window_menus = true,
             "--new-window" => new_window = true,
             "--version" => {
-                println!("vectorcraft {}", env!("CARGO_PKG_VERSION"));
+                // The DanCard fork's build number, when its workflow made this build (its release
+                // step checks it is there: without it, installs never update).
+                #[cfg(not(target_os = "macos"))]
+                let build = dancard_update::build().map(|b| format!(" (DanCard build {b})")).unwrap_or_default();
+                #[cfg(target_os = "macos")]
+                let build = "";
+                println!("vectorcraft {}{build}", env!("CARGO_PKG_VERSION"));
                 return std::process::ExitCode::SUCCESS;
             }
             _ => files.push(a),
@@ -684,6 +698,18 @@ fn main() -> std::process::ExitCode {
     };
     // Before desktop services, so every start-up warning is recorded (`logging`).
     let logger = logging::install();
+    // A newer build of the DanCard fork downloaded in the background replaces this one, or a new
+    // build that doesn't start gives way to the one before it, and that starts with the same
+    // arguments, before any window (`dancard_update`).
+    #[cfg(not(target_os = "macos"))]
+    if control_port.is_none()
+        && !new_window
+        && prefs_enabled()
+        && let Some(dir) = prefs_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        && dancard_update::apply_pending(&dir, &std::env::args_os().skip(1).collect::<Vec<_>>())
+    {
+        return std::process::ExitCode::SUCCESS;
+    }
     // A file opened while VectorCraft runs goes to its window as a tab: this launch ends here.
     #[cfg(not(target_os = "macos"))]
     if control_port.is_none()
@@ -904,6 +930,16 @@ fn main() -> std::process::ExitCode {
                 let _ = in_window_menus;
                 #[cfg(not(target_os = "macos"))]
                 single_instance::set_ui(&cc.egui_ctx);
+                // The DanCard fork's build (shown in its panel) and its updates.
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(build) = dancard_update::build() {
+                        vectorcraft_ui_egui::panels::dancard::set_build(build);
+                    }
+                    if control_port.is_none() && prefs_enabled() {
+                        dancard_update::start_checker(&cc.egui_ctx);
+                    }
+                }
                 file_access::unconfined(|| open_files(&mut app, files));
                 // The first frame is due from now (`gpu::watch_first_frame`).
                 #[cfg(feature = "wgpu")]

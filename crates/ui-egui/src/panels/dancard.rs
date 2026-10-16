@@ -40,6 +40,28 @@ mod tutro;
 #[path = "dancard_variable.rs"]
 mod variable;
 
+/// Số bản của lần build này (workflow của fork đặt, app báo lại lúc mở; bản build tay không có).
+static BUILD: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// Bản mới hơn đã tải về, dùng từ lần mở app sau (0: chưa có).
+static UPDATE_READY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Số bản của lần build này, hiện ở chân panel.
+pub fn set_build(build: u64) {
+    // Đặt một lần lúc mở app; lần đặt sau (không có) cũng là cùng số.
+    let _ = BUILD.set(build);
+}
+
+/// Bản `build` đã tải về (`dancard_update` của app): panel nhắc mở lại app để dùng.
+pub fn set_update_ready(build: u64) {
+    UPDATE_READY.store(build, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Chân panel: phiên bản, số bản (nếu có).
+fn foot_text() -> String {
+    let build = BUILD.get().map(|b| format!(" · bản {b}")).unwrap_or_default();
+    format!("DanCard trên VectorCraft {}{build}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Bề rộng panel khi mở từ cột biểu tượng hay nổi (dock::panel_width): rộng hơn panel thường cho
 /// đầu panel và các ô cạnh nhau như DanCard.
 pub const WIDTH: f32 = 320.0;
@@ -141,7 +163,11 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             }
             ui.add_space(4.0);
         });
-        style::footer(ui, &format!("DanCard trên VectorCraft {}", env!("CARGO_PKG_VERSION")));
+        let ready = UPDATE_READY.load(std::sync::atomic::Ordering::Relaxed);
+        if ready > BUILD.get().copied().unwrap_or(0) {
+            style::hint_strong(ui, &format!("Đã tải bản {ready}: đóng rồi mở lại app là dùng bản mới."));
+        }
+        style::footer(ui, &foot_text());
     });
 }
 
