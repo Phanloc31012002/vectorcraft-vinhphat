@@ -37,8 +37,11 @@ pub(crate) use read::{slot_frame, slot_of};
 #[cfg(test)]
 mod tests;
 
-/// Largest editing data read, decompressed (bytes).
-pub const MAX_DATA: u64 = 256 << 20;
+/// Largest editing data read, decompressed (bytes). DanCard fork (IN Vĩnh Phát): files with large
+/// placed photos carry more than 256 MB (a 217 MB sheet of cards: 352 MB), and opened without
+/// their layers and groups; 64-bit builds read up to 1 GB (held once; a file near that needs a few
+/// GB of memory to read), the web app 256 MB.
+pub const MAX_DATA: u64 = if cfg!(target_pointer_width = "64") { 1 << 30 } else { 256 << 20 };
 /// Largest Zstandard window accepted (a frame asking for more is damaged data).
 const MAX_ZSTD_WINDOW: u64 = 64 << 20;
 /// Most Zstandard frames read (the app writes one).
@@ -114,8 +117,15 @@ pub fn decode_private(raw: &[u8]) -> Result<Vec<u8>, String> {
     for (marker, codec) in [(&b"%AI24_ZStandard_Data"[..], Codec::Zstd), (b"%AI12_CompressedData", Codec::Zlib)] {
         if let Some(at) = find(raw, marker) {
             let (header, body) = raw.split_at(at);
-            let mut data = header.to_vec();
-            data.extend(codec.decode(body.get(marker.len()..).unwrap_or_default(), MAX_DATA.saturating_sub(header.len() as u64))?);
+            let body = codec.decode(body.get(marker.len()..).unwrap_or_default(), MAX_DATA.saturating_sub(header.len() as u64))?;
+            // DanCard fork: the data held once (no copy behind a header, which a `.ai` doesn't have).
+            if header.is_empty() {
+                return Ok(body);
+            }
+            let mut data = Vec::new();
+            data.try_reserve_exact(header.len() + body.len()).map_err(|_| too_large())?;
+            data.extend_from_slice(header);
+            data.extend_from_slice(&body);
             return Ok(data);
         }
     }
