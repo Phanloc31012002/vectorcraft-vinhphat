@@ -180,6 +180,12 @@ pub fn import(bytes: &[u8]) -> Result<Imported, String> {
 /// [`import`], an Illustrator EPS through the editing copy of its art only when `editing_data`
 /// (else what its page prints, as any EPS).
 pub fn import_with(bytes: &[u8], editing_data: bool) -> Result<Imported, String> {
+    import_trusting(bytes, editing_data, false)
+}
+
+/// DanCard fork: [`import_with`], an editing copy that draws differently from the page used all
+/// the same when `trust` (its layers and groups as they are, with a warning), as `layered_ai` does.
+pub fn import_trusting(bytes: &[u8], editing_data: bool, trust: bool) -> Result<Imported, String> {
     let (ps, _) = crate::sections(bytes).ok_or("the file's preview header points outside the file")?;
     if !ps.starts_with(b"%!") {
         return Err("this is not a PostScript file".into());
@@ -201,7 +207,7 @@ pub fn import_with(bytes: &[u8], editing_data: bool) -> Result<Imported, String>
     }
     let drew = !out.drawn.is_empty();
     let why = match (&result, drew) {
-        (Ok(()), true) if editing_data => return Ok(native::layered(ps, finish(out))),
+        (Ok(()), true) if editing_data => return Ok(native::layered(ps, finish(out), trust)),
         (Ok(()), true) => return Ok(finish(out)),
         (Ok(()), false) => "it draws nothing VectorCraft's PostScript reader can show".to_string(),
         (Err(e), _) => reason(e, fault.as_ref()),

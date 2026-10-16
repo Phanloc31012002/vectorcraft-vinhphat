@@ -109,7 +109,13 @@ pub fn ai(private: &[u8], page: &str) -> Vec<u8> {
 
 /// [`ai`] with more entries in the page dictionary (`/ArtBox [0 0 200 100]`).
 pub fn ai_with(private: &[u8], page: &str, entries: &str) -> Vec<u8> {
-    with_private(private, page, "AIPrivateData", entries)
+    with_private(private, page, "AIPrivateData", entries, "")
+}
+
+/// DanCard fork: [`ai`] with the page's `LastModified` date `page_date` and its private data's
+/// `data_date` (PDF dates such as `D:20261002101134+08'00'`).
+pub fn ai_dated(private: &[u8], page: &str, page_date: &str, data_date: &str) -> Vec<u8> {
+    with_private(private, page, "AIPrivateData", &format!("/LastModified ({page_date})"), &format!("/LastModified ({data_date})"))
 }
 
 /// A PDF saved with Illustrator's editing data: [`ai`]'s file with the two streams under
@@ -117,12 +123,12 @@ pub fn ai_with(private: &[u8], page: &str, entries: &str) -> Vec<u8> {
 /// #868, and nothing else of that file is used; ExifTool's PDF tag table lists them too
 /// (<https://exiftool.org/TagNames/PDF.html>).
 pub fn pdf(private: &[u8], page: &str) -> Vec<u8> {
-    with_private(private, page, "AIPDFPrivateData", "")
+    with_private(private, page, "AIPDFPrivateData", "", "")
 }
 
 /// The file of [`ai`] and [`pdf`], with `private` in the streams `{key}1` and `{key}2` and
-/// `entries` more in the page dictionary.
-fn with_private(private: &[u8], page: &str, key: &str, entries: &str) -> Vec<u8> {
+/// `entries` more in the page dictionary (and DanCard fork, `piece` in its private data's).
+fn with_private(private: &[u8], page: &str, key: &str, entries: &str, piece: &str) -> Vec<u8> {
     let (first, second) = private.split_at(private.len() / 2);
     let stream = |part: &[u8]| {
         let mut s = format!("<< /Length {} >>\nstream\n", part.len()).into_bytes();
@@ -136,7 +142,7 @@ fn with_private(private: &[u8], page: &str, key: &str, entries: &str) -> Vec<u8>
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] {entries} /Contents 4 0 R \
              /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> \
-             /PieceInfo << /{PIECE} << /Private << /{key}1 5 0 R /{key}2 6 0 R /NumBlock 2 >> >> >> >>"
+             /PieceInfo << /{PIECE} << {piece} /Private << /{key}1 5 0 R /{key}2 6 0 R /NumBlock 2 >> >> >> >>"
         )
         .into_bytes(),
         stream(page.as_bytes()),

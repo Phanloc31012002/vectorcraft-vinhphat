@@ -17,6 +17,8 @@
 //! objects and points. Anything it doesn't read is an error: the caller opens the file the way it
 //! did before (the printed page, or the PDF), with a warning saying why.
 
+// DanCard fork: editing data too large to hold, its images lowered as it decompresses.
+mod dancard_compact;
 mod frames;
 mod lex;
 mod mesh;
@@ -167,7 +169,9 @@ impl Codec {
             }
         }
         if out.len() as u64 > max {
-            return Err(too_large());
+            // DanCard fork: too large to hold whole: decompressed again, its images lowered to fit.
+            drop(out);
+            return dancard_compact::decompress(self, data, max);
         }
         Ok(out)
     }

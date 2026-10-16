@@ -62,8 +62,15 @@ const MAX_STACK: usize = 1 << 20;
 const MAX_NODES: usize = 4_000_000;
 /// Most points in one path.
 const MAX_POINTS: usize = 4_000_000;
-/// Largest image read (pixels).
+/// Largest image read (pixels): a larger one is read at a lower resolution, down to this.
+#[cfg(not(test))]
 const MAX_PIXELS: u64 = 1 << 25;
+/// (Small in the tests, which read larger images from little data.)
+#[cfg(test)]
+const MAX_PIXELS: u64 = 1 << 12;
+/// Largest image whose samples are read at all (pixels). DanCard fork: 64-bit builds read larger
+/// ones than [`MAX_PIXELS`] at a lower resolution, as far as the data holds them.
+const MAX_SOURCE_PIXELS: u64 = if cfg!(target_pointer_width = "64") { 1 << 31 } else { MAX_PIXELS };
 /// Largest side of the document and its artboards (points).
 const MAX_SIDE: f64 = 1e6;
 /// Art space (y up) → a pattern's space in the document's terms (y down).
@@ -571,6 +578,16 @@ impl<'a> Reader<'a> {
     fn comment(&mut self, c: &[u8]) -> Result<(), String> {
         let line = String::from_utf8_lossy(c);
         let line = line.trim_end();
+        // DanCard fork: data too large to hold, its images lowered as it decompressed.
+        if let Some(ppi) = line.strip_prefix(super::dancard_compact::LOWERED) {
+            self.warn(&format!(
+                "DanCard: file rất nặng (bản chỉnh sửa giải nén ra hơn {} MB) nên ảnh trong file được giảm còn khoảng {} ppi \
+                 trên trang để mở được cả file, group giữ nguyên.",
+                super::MAX_DATA >> 20,
+                ppi.trim()
+            ));
+            return Ok(());
+        }
         let m = marker(line);
         // A pattern's definition (one inside another's isn't read).
         if m == "BeginPattern" && self.pattern.is_none() {
@@ -782,6 +799,25 @@ impl<'a> Reader<'a> {
             _ => self.close(what, |k| matches!(k, Kind::Clip))?,
         };
         let Frame { kind, children: kids, gs, clips, hidden: opened_hidden, .. } = f;
+        // DanCard fork: a group holding nothing but a clipping path, in a clipping group (`q … u
+        // <path> W n U Q`, as art brought in from SVG has it), is that clipping group's clipping
+        // path. As a clipping group of its own it would clip nothing, and leave the art it is there
+        // to clip whole.
+        if matches!(kind, Kind::Group)
+            && !clips.is_empty()
+            && kids.iter().enumerate().all(|(i, k)| clips.contains(&i) || self.clip_fills.contains(&k.id))
+            && let Some(parent) = self.frames.last_mut().filter(|f| matches!(f.kind, Kind::Clip))
+        {
+            let (clip, fills): (Vec<Indexed>, Vec<Indexed>) = kids.into_iter().enumerate().partition(|(i, _)| clips.contains(i));
+            parent.children.extend(fills.into_iter().map(|(_, n)| n));
+            for (_, n) in clip {
+                parent.clips.push(parent.children.len());
+                parent.children.push(n);
+            }
+            self.group_ended = true;
+            self.after_object = true;
+            return Ok(());
+        }
         // A compound path of clipping paths clips its clipping group.
         let clipping = matches!(kind, Kind::Compound) && !clips.is_empty();
         self.group_ended = !matches!(kind, Kind::Compound);
@@ -840,6 +876,21 @@ impl<'a> Reader<'a> {
     /// path → the children and whether they clip.
     fn clip_first(&mut self, kids: Vec<Node>, clips: &[usize]) -> (Vec<Arc<Node>>, bool) {
         let (mut clip, rest): (Vec<Indexed>, Vec<Indexed>) = kids.into_iter().enumerate().partition(|(i, _)| clips.contains(i));
+        // DanCard fork: the same clipping path twice (a painted clipping path's drawn look, and the
+        // path itself on `%_` lines for newer readers) clips once: a compound path of the two
+        // would clip away everything they share under the even-odd rule. (Among a few: comparing
+        // every pair of many would be slow.)
+        if clip.len() <= 64 {
+            let mut seen: Vec<PathData> = vec![];
+            clip.retain(|(_, n)| match &n.kind {
+                NodeKind::Path { path, .. } if seen.contains(path) => false,
+                NodeKind::Path { path, .. } => {
+                    seen.push(path.clone());
+                    true
+                }
+                _ => true,
+            });
+        }
         let clip_node = match clip.len() {
             0 => None,
             1 => clip.pop().map(|(_, n)| n),
@@ -1639,7 +1690,7 @@ impl<'a> Reader<'a> {
         let n = Self::nums(&vals);
         let [_, _, _, _, w, h, bits, kind, alpha, _, binary, ..] = n.as_slice() else { return Ok(()) };
         let (w, h) = (*w as u64, *h as u64);
-        if w == 0 || h == 0 || w.saturating_mul(h) > MAX_PIXELS || ![1.0, 8.0].contains(bits) {
+        if w == 0 || h == 0 || w.saturating_mul(h) > MAX_SOURCE_PIXELS || ![1.0, 8.0].contains(bits) {
             self.warn("an image VectorCraft can't read was left out");
             return Ok(());
         }
@@ -1670,49 +1721,80 @@ impl<'a> Reader<'a> {
             return Ok(());
         };
         let opacity = opacity.filter(|_| alpha_len > 0);
-        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h as usize {
-            let line = samples.get(y * row..(y + 1) * row).unwrap_or_default();
-            for x in 0..w as usize {
-                let px = if *bits == 1.0 {
-                    let bit = line.get(x / 8).map_or(0, |b| (b >> (7 - x % 8)) & 1);
-                    let v = if bit == 1 { 255 } else { 0 };
-                    [v, v, v]
-                } else {
-                    let s = |c: usize| line.get(x * channels + c).copied().unwrap_or(0);
-                    match channels {
-                        1 => [s(0); 3],
-                        4 => {
-                            let key = [s(0), s(1), s(2), s(3)];
-                            if self.cmyk_cache.len() > 1 << 16 {
-                                self.cmyk_cache.clear();
+        // DanCard fork: an image of more than MAX_PIXELS (a large photo placed small, as print
+        // files have) is read at a lower resolution, each pixel the mean of a block of the image's,
+        // rather than left out.
+        let mut step = 1u64;
+        while w.div_ceil(step).saturating_mul(h.div_ceil(step)) > MAX_PIXELS {
+            step += 1;
+        }
+        if step > 1 {
+            self.warn("very large images came in at a lower resolution");
+        }
+        let (ow, oh, step) = (w.div_ceil(step) as usize, h.div_ceil(step) as usize, step as usize);
+        let mut rgba = Vec::with_capacity(ow * oh * 4);
+        // A row of blocks: each one's red, green, blue and alpha summed, and its pixels counted.
+        let mut sums = vec![[0u32; 5]; ow];
+        for oy in 0..oh {
+            sums.iter_mut().for_each(|s| *s = [0; 5]);
+            for y in oy * step..((oy + 1) * step).min(h as usize) {
+                let line = samples.get(y * row..(y + 1) * row).unwrap_or_default();
+                for x in 0..w as usize {
+                    let px = if *bits == 1.0 {
+                        let bit = line.get(x / 8).map_or(0, |b| (b >> (7 - x % 8)) & 1);
+                        let v = if bit == 1 { 255 } else { 0 };
+                        [v, v, v]
+                    } else {
+                        let s = |c: usize| line.get(x * channels + c).copied().unwrap_or(0);
+                        match channels {
+                            1 => [s(0); 3],
+                            4 => {
+                                let key = [s(0), s(1), s(2), s(3)];
+                                if self.cmyk_cache.len() > 1 << 16 {
+                                    self.cmyk_cache.clear();
+                                }
+                                *self.cmyk_cache.entry(key).or_insert_with(|| cmyk_rgb(key))
                             }
-                            *self.cmyk_cache.entry(key).or_insert_with(|| cmyk_rgb(key))
+                            _ => [s(0), s(1), s(2)],
                         }
-                        _ => [s(0), s(1), s(2)],
+                    };
+                    let a = opacity.and_then(|o| o.get(y * w as usize + x)).copied().unwrap_or(255);
+                    if let Some(s) = sums.get_mut(x / step) {
+                        for (sum, v) in s.iter_mut().zip([px[0], px[1], px[2], a, 1]) {
+                            *sum += u32::from(v);
+                        }
                     }
-                };
-                let a = opacity.and_then(|o| o.get(y * w as usize + x)).copied().unwrap_or(255);
-                rgba.extend_from_slice(&[px[0], px[1], px[2], a]);
+                }
+            }
+            for s in &sums {
+                let n = s[4].max(1);
+                let mean = |v: u32| u8::try_from((v + n / 2) / n).unwrap_or(u8::MAX);
+                rgba.extend_from_slice(&[mean(s[0]), mean(s[1]), mean(s[2]), mean(s[3])]);
             }
         }
-        let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) else { return Ok(()) };
+        let Some(img) = image::RgbaImage::from_raw(ow as u32, oh as u32, rgba) else { return Ok(()) };
         let mut png = vec![];
         if img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_err() {
             self.warn("an image VectorCraft can't read was left out");
             return Ok(());
         }
-        // The matrix maps pixels (y down) into art space with its y flipped.
+        // The matrix maps the image's space (its top left at the origin, y up, so the pixels lie
+        // below it) into art space: the pixels (y down) are flipped first. Flipping after the
+        // matrix instead turns an image rotated a quarter turn the other way, off its place (DanCard
+        // fork: such images made a file's layers look unlike its page, so it opened without its
+        // groups).
         let [a, b, c, d, tx, ty] = m.as_slice() else { return Ok(()) };
         let to_doc = self.space();
-        let xf = to_doc * FLIP * Affine::new([*a, *b, *c, *d, *tx, -*ty]);
+        // Read at a lower resolution, each pixel stands for a block of the image's.
+        let blocks = Affine::scale_non_uniform(w as f64 / ow as f64, h as f64 / oh as f64);
+        let xf = to_doc * Affine::new([*a, *b, *c, *d, *tx, *ty]) * FLIP * blocks;
         if !xf.as_coeffs().iter().all(|v| v.is_finite()) || xf.determinant().abs() < 1e-12 {
             return Ok(());
         }
         let blob = ImageBlob::new("image/png", png);
         let key = blob.content_key();
         self.doc.images.entry(key.clone()).or_insert(blob);
-        self.add_image(ImageObject { key, width: w as u32, height: h as u32, xf, link: None, placement: Default::default() }, false)
+        self.add_image(ImageObject { key, width: ow as u32, height: oh as u32, xf, link: None, placement: Default::default() }, false)
     }
 
     /// Add an image object with the state's transparency.

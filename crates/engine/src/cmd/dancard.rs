@@ -606,15 +606,62 @@ pub(super) fn make_upright(d: &mut Document, id: NodeId) -> f64 {
 /// VectorCraft dùng trang PDF thay cho bản chỉnh sửa): hình giữ đúng như trang `page`, các object
 /// được gom lại thành group như bản chỉnh sửa `private` (dữ liệu `AIPrivateData` của file) — xem
 /// `dancard_regroup.rs`. Không đọc được bản chỉnh sửa thì trang giữ nguyên.
-pub(crate) fn keep_groups(private: &[u8], mut page: Document, mut warnings: Vec<String>) -> (Document, Vec<String>) {
+pub(crate) fn keep_groups(private: &[u8], mut page: Document, mut warnings: Vec<String>, stale: bool) -> (Document, Vec<String>) {
+    // Lời báo của DanCard đứng đầu: thanh trạng thái chỉ hiện lời báo đầu tiên.
+    let mut notes = vec![];
+    if stale {
+        notes.push(STALE_NOTE.to_string());
+    }
     // Chỉ cần khung và cấu trúc của bản chỉnh sửa: đọc riêng nó, không so lại với trang (đã so,
     // khác trang nên mới tới đây) và chữ đọc như chữ.
-    let Ok((editing, _)) = vectorcraft_eps::ai_alone(private) else { return (page, warnings) };
-    let made = regroup::regroup(&mut page, &editing);
-    if made > 0 {
-        warnings.push(format!("DanCard: đã gom lại {made} group theo bản chỉnh sửa lưu trong file; hình giữ đúng như trang PDF."));
+    if let Ok((editing, _)) = vectorcraft_eps::ai_alone(private) {
+        let made = regroup::regroup(&mut page, &editing);
+        if made > 0 {
+            notes.push(format!("DanCard: đã gom lại {made} group theo bản chỉnh sửa lưu trong file; hình giữ đúng như trang PDF."));
+        }
     }
-    (page, warnings)
+    notes.append(&mut warnings);
+    (page, notes)
+}
+
+/// Báo khi file mở theo trang PDF vì trang được sửa sau bản chỉnh sửa lưu kèm.
+pub(crate) const STALE_NOTE: &str = "DanCard: trang PDF của file đã được sửa sau bản chỉnh sửa lưu kèm (có lẽ bằng chương trình khác), \
+     nên file mở theo trang PDF: hình đúng như sẽ in, group gom lại theo bản chỉnh sửa.";
+
+/// Mở file .ai / PDF theo bản chỉnh sửa lưu kèm file (`fileio::load`): giữ nguyên layer, group,
+/// clip group như trong file cả khi VectorCraft vẽ nó khác trang PDF (`LoadOptions::keep_groups`,
+/// mặc định; VectorCraft gốc khi đó mở theo trang PDF, rã hết group) — trừ khi trang được sửa sau
+/// bản chỉnh sửa (ngày `LastModified` của trang muộn hơn của bản chỉnh sửa, ISO 32000-1 §14.5):
+/// bản chỉnh sửa khi đó đã cũ, không còn là trang. → (dùng bản chỉnh sửa cả khi vẽ khác trang,
+/// bản chỉnh sửa đã cũ).
+pub(crate) fn trusts_editing_data(bytes: &[u8], opts: &fileio::LoadOptions) -> (bool, bool) {
+    if opts.trust_editing_data {
+        return (true, false);
+    }
+    let stale = opts.keep_groups && vectorcraft_pdf::page_newer_than_editing_data(bytes, opts.password.as_deref());
+    (opts.keep_groups && !stale, stale)
+}
+
+/// Lời báo của VectorCraft khi file mở theo bản chỉnh sửa dù vẽ khác trang PDF, nói lại bằng tiếng
+/// Việt: group giữ nguyên, hình khác trang bao nhiêu, xem lại trước khi in.
+pub(crate) fn note_kept_groups(warnings: &mut Vec<String>) {
+    let percent = |w: &str| {
+        let why = w.strip_suffix(": they come from its editing data all the same")?;
+        let (_, rest) = why.split_once("differs from the page's in ")?;
+        rest.split_once('%').map(|(pct, _)| pct.to_string())
+    };
+    for w in warnings.iter_mut() {
+        if let Some(pct) = percent(w) {
+            *w = format!(
+                "DanCard: giữ nguyên group, clip group như trong file (mở theo bản chỉnh sửa lưu kèm file). \
+                 Hình VectorCraft vẽ ra khác trang PDF của file khoảng {pct}%: xem kỹ trước khi in."
+            );
+        }
+    }
+    // Lời báo của DanCard đứng đầu: thanh trạng thái chỉ hiện lời báo đầu tiên.
+    let (mut ours, rest): (Vec<String>, Vec<String>) = std::mem::take(warnings).into_iter().partition(|w| w.starts_with("DanCard:"));
+    ours.extend(rest);
+    *warnings = ours;
 }
 
 /// Trục để raster `ids` theo khung transform (Object › Rasterize `followAngle`): (trang → hệ trục

@@ -76,9 +76,12 @@ cargo test -p vectorcraft-engine --lib -- dancard tests_prefs || fail "test DanC
 cargo test -p vectorcraft-ui-egui --lib -- dancard i18n:: canvas:: dialogs:: prefs panel_docking floating:: dock:: || fail "test DanCard (giao diện, kể cả bảng kéo to nhỏ và ghép bảng)"
 cargo test -p vectorcraft --bin vectorcraft -- dancard_update single_instance || fail "test DanCard (app: tự cập nhật, một cửa sổ)"
 cargo test -p vectorcraft-engine --test command_sweep || fail "quét mọi lệnh với tham số rác"
+cargo test -p vectorcraft-eps --lib -- import::ai || fail "test đọc file .ai / EPS giữ group (ảnh xoay, clip từ SVG, ảnh lớn, file rất nặng)"
+cargo test -p vectorcraft-pdf --lib -- dancard || fail "test ngày sửa trang PDF so với bản chỉnh sửa"
+cargo test -p vectorcraft-engine --test import_fuzz || fail "mở file rác (import_fuzz)"
 # Clippy: build hỏng là lỗi; cảnh báo chỉ tính ở file của DanCard (cảnh báo mới do clippy bản mới
 # trong code gốc VectorCraft thì không chặn việc đồng bộ).
-if ! clippy_out=$(cargo clippy -p vectorcraft-engine -p vectorcraft-ui-egui -p vectorcraft --all-targets --message-format=short 2>&1); then
+if ! clippy_out=$(cargo clippy -p vectorcraft-engine -p vectorcraft-ui-egui -p vectorcraft -p vectorcraft-eps -p vectorcraft-pdf --all-targets --message-format=short 2>&1); then
     echo "$clippy_out" | tail -n 40
     fail "cargo clippy"
 fi

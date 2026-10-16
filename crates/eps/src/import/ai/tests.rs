@@ -517,6 +517,36 @@ fn images_with_alpha_channels() {
     assert!(art(&r.doc).is_empty() && r.warnings.iter().any(|w| w.contains("cut short")));
 }
 
+#[test]
+fn an_image_of_more_pixels_than_are_read_comes_in_at_a_lower_resolution() {
+    // DanCard fork. 100 × 50 grey pixels, columns black and light in turn, past the tests' 4096:
+    // read as 50 × 25 pixels, each the mean of 2 × 2, over the same place.
+    let data: Vec<u8> = (0..50).flat_map(|_| (0..100).map(|x| if x % 2 == 0 { 0 } else { 200 })).collect();
+    let r = read(&image("[ 1 0 0 1 0 100 ]", (100, 50), ("DeviceGray", 1, 0), &data, data.len())).unwrap();
+    let (img, xf) = pixels(&r.doc);
+    assert_eq!(img.dimensions(), (50, 25));
+    assert_eq!(img.get_pixel(0, 0).0, [100, 100, 100, 255]);
+    assert_eq!((xf * Point::ZERO, xf * Point::new(50.0, 25.0)), (Point::new(0.0, 0.0), Point::new(100.0, 50.0)));
+    assert!(r.warnings.iter().any(|w| w.contains("lower resolution")), "{:?}", r.warnings);
+}
+
+#[test]
+fn images_turned_a_quarter_turn_turn_about_their_top_left() {
+    // DanCard fork. A 2×1 image whose top left is at (50, 90) in art space, (50, 10) on the page:
+    // its pixels are flipped (y up, hanging below the top left) before the matrix, so turning the
+    // matrix turns the image about that corner, as unturned it hangs right and down from it.
+    let at = |m: &str| pixels(&read(&image(m, (2, 1), ("DeviceRGB", 3, 0), &[255, 0, 0, 0, 255, 0], 6)).unwrap().doc).1;
+    let corners = |xf: kurbo::Affine| (xf * Point::ZERO, xf * Point::new(2.0, 0.0), xf * Point::new(2.0, 1.0));
+    let unturned = corners(at("[ 10 0 0 10 50 90 ]"));
+    assert_eq!(unturned, (Point::new(50.0, 10.0), Point::new(70.0, 10.0), Point::new(70.0, 20.0)));
+    // A quarter turn clockwise on the page: the width runs down the page, the height to the left.
+    let clockwise = corners(at("[ 0 -10 10 0 50 90 ]"));
+    assert_eq!(clockwise, (Point::new(50.0, 10.0), Point::new(50.0, 30.0), Point::new(40.0, 30.0)));
+    // And the other way: the width runs up the page, the height to the right.
+    let other = corners(at("[ 0 10 -10 0 50 90 ]"));
+    assert_eq!(other, (Point::new(50.0, 10.0), Point::new(50.0, -10.0), Point::new(60.0, -10.0)));
+}
+
 /// Editing data with one layer (showing or not) holding a placed file: its matrix, the file at
 /// `path` in the box 10 20 14 22, and `preview` (what its preview section holds), then `after`.
 fn placed(visible: bool, matrix: &str, path: &str, preview: Option<&[u8]>, after: &str) -> Vec<u8> {
@@ -884,6 +914,54 @@ fn a_compound_clipping_path_with_a_fill_paints_once_under_its_clip() {
     let NodeKind::Compound { children: painted, .. } = &children[1].kind else { panic!("{:?}", children[1].kind) };
     assert_eq!((painted.len(), fill(&children[1]).color()), (2, Some(Color::rgb(0.0, 0.0, 1.0))));
     assert_eq!(fill(&children[2]).color(), Some(Color::rgb(1.0, 0.0, 0.0)));
+}
+
+#[test]
+fn a_clipping_path_alone_in_a_group_clips_the_clipping_group_round_it() {
+    // DanCard fork. Art brought in from SVG has each clipping group's clipping path last, alone in
+    // a group named as the SVG's clip path: `q q <art> u <path> W n U Q u <path> W n U Q`.
+    let art_ = format!(
+        "0 Ae\nq\n0 Ae\nq\n{RED}{}f\n0 Ae\nu\n{}h\nW\nn\nU\n%_/ArtDictionary :\n%_/XMLUID : (SVGID_2_) ; (AI10_ArtUID) ,\n%_;\n\
+         0 0 Xd\n6 () XW\nQ\n9 () XW\n0 Ae\nu\n{}h\nW\nn\nU\n0 0 Xd\n6 () XW\nQ\n9 () XW\n",
+        rect_path(0.0, 0.0, 100.0, 100.0),
+        rect_path(10.0, 10.0, 60.0, 60.0),
+        rect_path(20.0, 20.0, 90.0, 90.0),
+    );
+    let doc = read_ok(&layer(&art_)).doc;
+    let a = art(&doc);
+    assert_eq!(a.len(), 1, "{a:#?}");
+    // The outer clipping group: its clipping path first, then the inner one with its own.
+    let NodeKind::Group { children: outer, clip: true } = &a[0].kind else { panic!("{:?}", a[0].kind) };
+    assert_eq!(outer.len(), 2, "{outer:#?}");
+    let bounds = |n: &Node| match &n.kind {
+        NodeKind::Path { path, clipping: true, .. } => path.bounds(),
+        _ => None,
+    };
+    assert_eq!(bounds(&outer[0]), Some(Rect::new(20.0, 10.0, 90.0, 80.0)), "the page is 100 pt high: y down");
+    let NodeKind::Group { children: inner, clip: true } = &outer[1].kind else { panic!("{:?}", outer[1].kind) };
+    assert_eq!(inner.len(), 2, "{inner:#?}");
+    assert_eq!(bounds(&inner[0]), Some(Rect::new(10.0, 40.0, 60.0, 90.0)));
+    assert!(inner[0].name.as_deref().is_some_and(|n| n.starts_with("SVGID")), "the group's name is its path's: {:?}", inner[0].name);
+    assert_eq!(fill(&inner[1]).color(), Some(Color::rgb(1.0, 0.0, 0.0)));
+}
+
+#[test]
+fn a_painted_clipping_path_written_as_its_look_clips_once_under_its_paint() {
+    // DanCard fork. A clipping path with a style (a blue fill) is written as its drawn look, a group
+    // holding the path clipping and painted (`u <path> W f U`), then as itself on `%_` lines for
+    // newer readers: it clips its clipping group once, its fill painted under the art it clips.
+    let clip = rect_path(10.0, 10.0, 90.0, 90.0);
+    let copy: String = format!("{clip}h\nW\nn\n").lines().map(|l| format!("%_{l}\n")).collect();
+    let art_ = format!(
+        "0 Ae\nq\n{RED}{}f\n0 Ae\nu\n0 0 1 0 0 0 1 Xa\n{clip}h\nW\nf\nU\n0 0 Xd\n6 () XW\n{copy}1 (Anon style) XW\nQ\n",
+        rect_path(0.0, 0.0, 50.0, 50.0),
+    );
+    let doc = read_ok(&layer(&art_)).doc;
+    let a = art(&doc);
+    assert_eq!(a.len(), 1, "{a:#?}");
+    let NodeKind::Group { children, clip: true } = &a[0].kind else { panic!("{:?}", a[0].kind) };
+    let kinds: Vec<_> = children.iter().map(|c| (matches!(c.kind, NodeKind::Path { clipping: true, .. }), fill(c).color())).collect();
+    assert_eq!(kinds, [(true, None), (false, Some(Color::rgb(0.0, 0.0, 1.0))), (false, Some(Color::rgb(1.0, 0.0, 0.0)))]);
 }
 
 #[test]

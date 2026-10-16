@@ -1115,9 +1115,12 @@ fn compare(frame: &Frame<'_>, view: &mut PageView, layered: &Document) -> Result
 /// hidden ones too), groups, compound paths, clipping groups and artboards, with the text and the
 /// strokes around it of the page. When the file has no editing copy, `visible` as it was; when it
 /// has one that can't be used, `visible` with a warning that says why.
-pub(super) fn layered(ps: &[u8], visible: Imported) -> Imported {
+///
+/// DanCard fork: `trust`, layers that draw differently from the page are used all the same, with
+/// a warning (as [`layered_ai`] does).
+pub(super) fn layered(ps: &[u8], visible: Imported, trust: bool) -> Imported {
     let Some(data) = editing_copy(ps) else { return visible };
-    let result = data.and_then(|data| build(&data, Some(&visible.document), Page::Art, false, false));
+    let result = data.and_then(|data| build(&data, Some(&visible.document), Page::Art, false, trust));
     match result {
         Ok((document, mut warnings)) => {
             for w in &visible.warnings {

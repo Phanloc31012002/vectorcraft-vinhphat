@@ -125,6 +125,11 @@ pub fn offer(app: &mut VectorcraftApp, name: &str, bytes: &[u8], path: Option<St
     if place.is_none() && vectorcraft_pdf::editing_with(bytes, None).is_some() {
         return false;
     }
+    // DanCard fork: so does a `.ai` or PDF carrying its editor's copy of the art (every artboard,
+    // its groups as they are): picking pages would open only the PDF part's, without its groups.
+    if place.is_none() && vectorcraft_pdf::has_illustrator_data(bytes, None) {
+        return false;
+    }
     let (pages, locked) = match vectorcraft_pdf::info(bytes, None) {
         Ok(i) if i.pages.len() > 1 => (i.pages.len(), false),
         Err(PdfError::NeedsPassword) => (0, true),

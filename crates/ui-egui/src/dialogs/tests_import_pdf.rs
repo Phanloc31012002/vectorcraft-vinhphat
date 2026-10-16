@@ -197,3 +197,23 @@ fn placing_a_saved_ai_still_asks_for_the_page() {
     assert!(import_pdf::offer(&mut app, "two.ai", &bytes, None, Some(&json!({}))));
     assert_eq!(app.ui.dialog.as_ref().unwrap().str("mode"), "place");
 }
+
+/// DanCard fork: a `.ai` of several artboards carrying its editing data opens every artboard from
+/// it at once, its groups as they are: there are no pages to pick (picking some would open only
+/// the PDF part's, ungrouped).
+#[test]
+fn an_ai_file_carrying_its_editing_data_opens_without_asking_for_pages() {
+    use vectorcraft_testkit::ai;
+    use vectorcraft_testkit::pdf::{first_extra, pdf_with};
+    let mut app = app();
+    let data = ai::editing_data(200.0, 100.0, &ai::layer("Art", &format!("0 g\n{}f\n", ai::rect(10.0, 10.0, 50.0, 50.0))));
+    let first = PdfPage {
+        entries: format!("/PieceInfo << /Illustrator << /Private << /AIPrivateData1 {} 0 R /NumBlock 1 >> >> >>", first_extra(2)),
+        ..PdfPage::new(200.0, 100.0, "0 g 10 10 40 40 re f")
+    };
+    let bytes = pdf_with(&[first, PdfPage::new(200.0, 100.0, "")], &[&format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len())], None);
+    assert!(!import_pdf::offer(&mut app, "two.ai", &bytes, None, None));
+    assert!(app.ui.dialog.is_none());
+    // Placing it still asks for the page.
+    assert!(import_pdf::offer(&mut app, "two.ai", &bytes, None, Some(&json!({}))));
+}

@@ -40,6 +40,8 @@
 //!   opens an encrypted file.
 #![forbid(unsafe_code)]
 
+// DanCard fork: is the editing data older than the page?
+mod dancard;
 mod editing;
 mod encrypt;
 mod export;
@@ -67,6 +69,7 @@ mod settings;
 mod streams;
 mod syntax;
 
+pub use dancard::page_newer_than_editing_data;
 pub use editing::{EDITING_FILE, Editing, LEGACY_EDITING_FILE, editing, editing_with};
 pub use encrypt::Encryption;
 pub use export::{export, export_with_report, page_areas};

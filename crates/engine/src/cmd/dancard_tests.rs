@@ -998,3 +998,82 @@ fn dung_thang_group_do_goc_giu_dung_khung_con() {
     let ab = d.node(a).unwrap().geometric_bounds().unwrap();
     assert!((ab.width() / CM - 9.2).abs() < 1e-6 && (ab.height() / CM - 5.6).abs() < 1e-6, "{ab:?}");
 }
+
+/// File .ai có một layer `Art`: group `Pair` (hai hình vuông đen) và một hình vuông nữa ngoài
+/// group mà trang PDF không vẽ: bản chỉnh sửa vẽ khác trang (VectorCraft gốc khi đó mở theo trang
+/// PDF, rã group). `dates`: ngày sửa của trang và của bản chỉnh sửa.
+fn ai_ve_khac_trang(dates: Option<(&str, &str)>) -> Vec<u8> {
+    use vectorcraft_testkit::ai;
+    let pair = format!("0 Ae\nu\n0 g\n{}f\n{}f\nU\n{}", ai::rect(10.0, 50.0, 40.0, 90.0), ai::rect(50.0, 50.0, 80.0, 90.0), ai::named("Pair"));
+    let extra = format!("0 0 1 0 k\n{}f\n", ai::rect(120.0, 10.0, 160.0, 50.0));
+    let data = ai::editing_data(200.0, 100.0, &ai::layer("Art", &format!("{pair}{extra}")));
+    let page = "0 g 10 50 30 40 re f 50 50 30 40 re f";
+    match dates {
+        Some((page_date, data_date)) => ai::ai_dated(data.as_bytes(), page, page_date, data_date),
+        None => ai::ai(data.as_bytes(), page),
+    }
+}
+
+fn mo_file(s: &mut Session, bytes: &[u8], extra: Value) -> Value {
+    mo_file_ten(s, "card.ai", bytes, extra)
+}
+
+fn mo_file_ten(s: &mut Session, name: &str, bytes: &[u8], extra: Value) -> Value {
+    let mut p = json!({"name": name, "dataBase64": vectorcraft_format::base64_encode(bytes)});
+    if let (Some(p), Some(e)) = (p.as_object_mut(), extra.as_object()) {
+        p.extend(e.clone());
+    }
+    run(s, "document.open", p)
+}
+
+fn ten_layer(s: &Session) -> Vec<String> {
+    s.doc().unwrap().doc.layers.iter().map(|l| l.name.clone().unwrap_or_default()).collect()
+}
+
+#[test]
+fn mo_file_ai_giu_nguyen_group_ca_khi_ve_khac_trang_pdf() {
+    let mut s = Session::new();
+    let r = mo_file(&mut s, &ai_ve_khac_trang(None), json!({}));
+    assert_eq!(ten_layer(&s), ["Art"], "{r}");
+    let art = s.doc().unwrap().doc.layers[0].children().unwrap().clone();
+    let pair = art.iter().find(|n| n.name.as_deref() == Some("Pair")).expect("group Pair");
+    assert!(matches!(&pair.kind, NodeKind::Group { children, .. } if children.len() == 2), "{:?}", pair.kind);
+    assert_eq!(art.len(), 2, "group và hình vuông ngoài group");
+    let w = r["warnings"].to_string();
+    let first = r["warnings"][0].as_str().unwrap_or_default();
+    assert!(first.starts_with("DanCard: giữ nguyên group") && first.contains("khác trang PDF"), "đứng đầu, thanh trạng thái hiện nó: {w}");
+    assert!(!w.contains("all the same"), "lời báo tiếng Anh được nói lại bằng tiếng Việt: {w}");
+    // `checked`: như VectorCraft gốc, theo trang PDF (group gom lại theo bản chỉnh sửa).
+    let r = mo_file(&mut s, &ai_ve_khac_trang(None), json!({"editingData": "checked"}));
+    assert_ne!(ten_layer(&s), ["Art"], "{r}");
+    assert!(r["warnings"].to_string().contains("weren't read"), "{r}");
+}
+
+#[test]
+fn trang_pdf_sua_sau_ban_chinh_sua_thi_mo_theo_trang() {
+    let mut s = Session::new();
+    let (truoc, sau) = ("D:20261002101134+08'00'", "D:20261002111134+08'00'");
+    let r = mo_file(&mut s, &ai_ve_khac_trang(Some((sau, truoc))), json!({}));
+    assert_ne!(ten_layer(&s), ["Art"], "{r}");
+    assert_eq!(r["warnings"][0], super::STALE_NOTE, "{r}");
+    // Lưu cùng lúc (file Illustrator lưu): theo bản chỉnh sửa.
+    let r = mo_file(&mut s, &ai_ve_khac_trang(Some((truoc, truoc))), json!({}));
+    assert_eq!(ten_layer(&s), ["Art"], "{r}");
+}
+
+#[test]
+fn mo_file_eps_cung_giu_nguyen_group() {
+    use vectorcraft_testkit::ai;
+    // Bản chỉnh sửa như file .ai trên, trang PostScript chỉ vẽ group.
+    let pair = format!("0 Ae\nu\n0 g\n{}f\n{}f\nU\n{}", ai::rect(10.0, 50.0, 40.0, 90.0), ai::rect(50.0, 50.0, 80.0, 90.0), ai::named("Pair"));
+    let extra = format!("0 0 1 0 k\n{}f\n", ai::rect(120.0, 10.0, 160.0, 50.0));
+    let data = ai::editing_data(200.0, 100.0, &ai::layer("Art", &format!("{pair}{extra}")));
+    let eps = ai::eps(data.as_bytes(), "0 setgray 10 50 30 40 rectfill 50 50 30 40 rectfill\n");
+    let mut s = Session::new();
+    let r = mo_file_ten(&mut s, "card.eps", &eps, json!({}));
+    assert_eq!(ten_layer(&s), ["Art"], "{r}");
+    assert!(r["warnings"][0].as_str().unwrap_or_default().starts_with("DanCard: giữ nguyên group"), "{r}");
+    // `checked`: như VectorCraft gốc, theo trang.
+    let r = mo_file_ten(&mut s, "card.eps", &eps, json!({"editingData": "checked"}));
+    assert_ne!(ten_layer(&s), ["Art"], "{r}");
+}

@@ -160,12 +160,16 @@ fn through_editing_data(bytes: &[u8], opts: &LoadOptions, doc: Document, warning
     }
     let Some(private) = vectorcraft_pdf::illustrator_data(bytes, opts.password.as_deref()) else { return (doc, warnings) };
     let outlined = opts.text_as == vectorcraft_pdf::TextAs::Outlines;
-    let (doc, mut warnings, read) = vectorcraft_eps::layered_ai(&private, doc, warnings, outlined, opts.trust_editing_data);
+    // DanCard: the editing data is used even where it draws differently from the PDF part, its
+    // groups kept, unless the page was changed after it.
+    let (trust, stale) = crate::cmd::dancard::trusts_editing_data(bytes, opts);
+    let (doc, mut warnings, read) = vectorcraft_eps::layered_ai(&private, doc, warnings, outlined, trust);
     // The layers weren't read (or couldn't be): the notes of reading the PDF part still hold.
     // DanCard: the page's art, grouped as the editing data groups it when that can be read.
     if !read {
-        return crate::cmd::dancard::keep_groups(&private, doc, warnings);
+        return crate::cmd::dancard::keep_groups(&private, doc, warnings, stale);
     }
+    crate::cmd::dancard::note_kept_groups(&mut warnings);
     // The layers hold the art that the PDF part leaves out or, in a PDF, that the import clipped
     // to the page.
     warnings.retain(|w| w != vectorcraft_pdf::OFF_ARTBOARD_NOTE && w != vectorcraft_pdf::PAST_PAGE_NOTE);
@@ -200,8 +204,13 @@ pub fn load_with(name: &str, bytes: &[u8], opts: &LoadOptions) -> Result<Loaded>
         _ if format.id == "eps" || vectorcraft_pdf::is_postscript(bytes) => {
             let editing = vectorcraft_eps::has_native(bytes).then_some((true, || vectorcraft_eps::native(bytes)));
             restore_or_import(editing, || {
-                let r = vectorcraft_eps::import_with(bytes, opts.editing_data).map_err(|e| err(format!("can't open `{}`: {e}", file_name(name))))?;
-                Ok((r.document, r.warnings))
+                // DanCard: an Illustrator EPS keeps its groups too, from its editing copy.
+                let trust = opts.trust_editing_data || opts.keep_groups;
+                let r = vectorcraft_eps::import_trusting(bytes, opts.editing_data, trust)
+                    .map_err(|e| err(format!("can't open `{}`: {e}", file_name(name))))?;
+                let mut warnings = r.warnings;
+                crate::cmd::dancard::note_kept_groups(&mut warnings);
+                Ok((r.document, warnings))
             })?
         }
         "vectorcraft" | "template" => {

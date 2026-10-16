@@ -285,10 +285,13 @@ pub(crate) fn bleed(page: &Page<'_>) -> [f64; 4] {
 }
 
 /// The `PieceInfo` key such files keep their private data under.
-const PRIVATE_DATA_OWNER: &[u8] = b"Illustrator"; // brand-ok: the key the files use
+pub(crate) const PRIVATE_DATA_OWNER: &[u8] = b"Illustrator"; // brand-ok: the key the files use
 
-/// Most bytes of an editor's private data read.
-const MAX_PRIVATE: usize = 256 << 20;
+/// Most bytes of an editor's private data read. DanCard fork (IN Vĩnh Phát): files with large
+/// placed photos carry a lot of it (a 217 MB sheet of cards: 108 MB), and past the limit open
+/// without their layers and groups; 64-bit builds read up to 1 GB, as `vectorcraft_eps::MAX_DATA`
+/// decompresses, the web app 256 MB.
+const MAX_PRIVATE: usize = if cfg!(target_pointer_width = "64") { 1 << 30 } else { 256 << 20 };
 
 /// The private data of an Illustrator `.ai` (its first page's `PieceInfo`): the `AIPrivateData`
 /// streams in order, joined. A PDF saved with the editing data has its streams under
