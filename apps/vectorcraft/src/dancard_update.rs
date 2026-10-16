@@ -970,11 +970,15 @@ fn at_start(root: &Path, current: u64, count: bool) -> Start {
     apply_ready(&app, &update, current)
 }
 
-/// Updates may apply at a start with `args` (its arguments): not for `--version`, a window of its
-/// own (`--new-window`) or one an agent drives (`--control`, `VECTORCRAFT_CONTROL_PORT`).
+/// Updates may apply at a start with `args` (its arguments): not for `--version` or `--help`, a
+/// window of its own (`--new-window`) or one an agent drives (`--control`,
+/// `VECTORCRAFT_CONTROL_PORT`).
 pub fn may_apply(args: &[OsString]) -> bool {
     let driven = std::env::var_os("VECTORCRAFT_CONTROL_PORT").is_some_and(|v| !v.is_empty());
-    !driven && !args.iter().any(|a| a == "--version" || a == "--new-window" || a.to_str().is_some_and(|a| a.starts_with("--control")))
+    !driven
+        && !args
+            .iter()
+            .any(|a| a == "--version" || a == "--help" || a == "-h" || a == "--new-window" || a.to_str().is_some_and(|a| a.starts_with("--control")))
 }
 
 /// At the start, before anything else: apply a downloaded newer build, roll back a new one that
@@ -1369,7 +1373,7 @@ mod tests {
         if std::env::var_os("VECTORCRAFT_CONTROL_PORT").is_none() {
             assert!(may_apply(&args(&[])) && may_apply(&args(&["a.ai", "b.pdf"])));
         }
-        for a in ["--version", "--new-window", "--control", "--control=7979"] {
+        for a in ["--version", "--help", "-h", "--new-window", "--control", "--control=7979"] {
             assert!(!may_apply(&args(&["x.ai", a])), "{a}");
         }
         #[cfg(feature = "wgpu")]

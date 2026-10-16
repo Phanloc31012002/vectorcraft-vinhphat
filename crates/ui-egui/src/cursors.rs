@@ -335,6 +335,7 @@ fn glyph(c: Cursor, p: Pos2) -> Option<Vec<Shape>> {
         Cursor::RotateToward(octant) => rotate(ink, p, octant),
         Cursor::CornerRadius => corner_radius(ink, p),
         Cursor::Pen => pen(ink, p, "*"),
+        Cursor::PenDrawing => pen(ink, p, ""),
         Cursor::PenAdd => pen(ink, p, "+"),
         Cursor::PenDelete => pen(ink, p, "-"),
         Cursor::PenClose => pen(ink, p, "o"),
@@ -392,6 +393,18 @@ pub const OS_CURSORS: bool = !cfg!(any(target_os = "macos", target_arch = "wasm3
 /// and PdfCraft do.
 pub fn os_cursors(build: bool, wayland: bool) -> bool {
     build && !wayland
+}
+
+/// Does the window hide the pointer only while it is the key window? macOS does: winit hides it with
+/// a cursor rect holding a transparent cursor, and macOS applies the rect only in the key window.
+/// Over a window behind another app or under a sheet, the system pointer shows (#2020).
+pub const HIDES_ONLY_WHEN_KEY: bool = cfg!(target_os = "macos");
+
+/// Does the window paint the glyphs over a hidden pointer, `focused` or not? Not where the system
+/// shows its pointer over a window without the focus ([`HIDES_ONLY_WHEN_KEY`]): the system pointer
+/// shows alone there.
+pub fn paint_glyphs(hides_only_when_key: bool, focused: bool) -> bool {
+    focused || !hides_only_when_key
 }
 
 /// The cursor bitmaps handed to the OS, by (cursor, pixels per point): each glyph is rasterized
@@ -507,7 +520,7 @@ mod tests {
     use crate::VectorcraftApp;
 
     /// Every cursor with a glyph.
-    const GLYPHS: [Cursor; 38] = [
+    const GLYPHS: [Cursor; 39] = [
         Cursor::Hand,
         Cursor::HandGrab,
         Cursor::ZoomIn,
@@ -524,6 +537,7 @@ mod tests {
         Cursor::RotateToward(1),
         Cursor::CornerRadius,
         Cursor::Pen,
+        Cursor::PenDrawing,
         Cursor::PenAdd,
         Cursor::PenDelete,
         Cursor::PenClose,
@@ -603,6 +617,27 @@ mod tests {
         assert!(body[3] == 255 && body[..3].iter().all(|&c| c < 40), "{body:?}");
     }
 
+    /// The Pen drawing a path is the same nib as the new-path Pen, without the asterisk.
+    #[test]
+    fn the_drawing_pen_has_no_new_path_asterisk() {
+        for ppp in [1.0, 2.0] {
+            let (new, drawing) = (rasterize(Cursor::Pen, ppp).unwrap(), rasterize(Cursor::PenDrawing, ppp).unwrap());
+            assert_eq!(new.hotspot, drawing.hotspot, "at {ppp}");
+            // The asterisk's center, 19 × 17 points from the hotspot.
+            let at = |img: &CustomCursorImage| {
+                let [hx, hy] = img.hotspot.map(usize::from);
+                let (x, y) = (hx + (19.0 * ppp) as usize, hy + (17.0 * ppp) as usize);
+                if x < img.size[0] as usize && y < img.size[1] as usize { pixel(img, x, y)[3] } else { 0 }
+            };
+            assert_eq!(at(&new), 255, "the new-path Pen has its asterisk at {ppp}");
+            assert_eq!(at(&drawing), 0, "the drawing Pen has no badge at {ppp}");
+            // The nib is the same.
+            let [hx, hy] = drawing.hotspot.map(usize::from);
+            let nib = (hx + (8.0 * ppp) as usize, hy + (8.0 * ppp) as usize);
+            assert_eq!(pixel(&new, nib.0, nib.1), pixel(&drawing, nib.0, nib.1), "at {ppp}");
+        }
+    }
+
     #[test]
     fn each_bitmap_is_made_once_so_the_os_cursor_is_kept() {
         let mut images = Images::default();
@@ -619,6 +654,20 @@ mod tests {
     fn frame(app: &mut VectorcraftApp, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
         let time = Some(ctx.input(|i| i.time) + 0.1);
         let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time, events, ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        });
+        out.textures_delta.clear();
+        out
+    }
+
+    /// One [`frame`] with `focused` set: true for a window that has the focus, false while another app
+    /// or a sheet has it.
+    fn focus_frame(app: &mut VectorcraftApp, ctx: &egui::Context, focused: bool, events: Vec<egui::Event>) -> egui::FullOutput {
+        let time = Some(ctx.input(|i| i.time) + 0.1);
+        let screen_rect = Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)));
+        let raw = egui::RawInput { screen_rect, time, focused, events, ..Default::default() };
         let mut out = ctx.run_ui(raw, |ui| {
             app.logic(ui.ctx());
             app.ui(ui);
@@ -678,6 +727,32 @@ mod tests {
         assert_eq!(out.platform_output.cursor_icon, egui::CursorIcon::None);
     }
 
+    /// On macOS a window without the focus shows the system pointer over the canvas, and the glyph
+    /// is not painted next to it (#2020). With the focus back, the canvas sets `CursorIcon::None` again
+    /// on the next frame, without a pointer move.
+    #[test]
+    fn a_window_without_the_focus_shows_the_system_cursor_alone_on_macos() {
+        // Wayland: every desktop build paints the glyphs.
+        let mut app = VectorcraftApp::new(Session::new(), crate::Services { wayland: true, ..Default::default() });
+        app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
+        app.run("tool.select", json!({"tool": "rectangle"})).unwrap();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let over = app.canvas_rect.unwrap().center();
+        let key = focus_frame(&mut app, &ctx, true, vec![egui::Event::PointerMoved(over)]);
+        assert_eq!(key.platform_output.cursor_icon, egui::CursorIcon::None, "with the focus: the glyph alone");
+        let away = focus_frame(&mut app, &ctx, false, vec![egui::Event::WindowFocused(false), egui::Event::PointerMoved(over + vec2(5.0, 3.0))]);
+        if HIDES_ONLY_WHEN_KEY {
+            assert_eq!(away.platform_output.cursor_icon, egui::CursorIcon::Crosshair, "macOS without the focus: the system pointer alone");
+        } else {
+            assert_eq!(away.platform_output.cursor_icon, egui::CursorIcon::None, "other platforms: the glyph without the focus too");
+        }
+        let back = focus_frame(&mut app, &ctx, true, vec![egui::Event::WindowFocused(true)]);
+        assert_eq!(back.platform_output.cursor_icon, egui::CursorIcon::None, "the focus back: the glyph alone");
+    }
+
     /// User Interface › Scale Cursor Proportional to UI (#394): off, the tool cursors keep their
     /// size whatever the UI Scaling; on, they grow with it.
     #[test]
@@ -720,6 +795,13 @@ mod tests {
         assert!(os_cursors(true, false), "Windows, X11");
         assert!(!os_cursors(true, true), "Wayland: the compositor would size the bitmap (#1645)");
         assert!(!os_cursors(false, false) && !os_cursors(false, true), "macOS, the web");
+    }
+
+    #[test]
+    fn macos_windows_paint_the_glyphs_only_with_the_focus() {
+        assert!(paint_glyphs(true, true), "macOS with the focus");
+        assert!(!paint_glyphs(true, false), "macOS without the focus: the system pointer shows (#2020)");
+        assert!(paint_glyphs(false, true) && paint_glyphs(false, false), "Wayland, the web: painted with the focus or without");
     }
 
     #[test]

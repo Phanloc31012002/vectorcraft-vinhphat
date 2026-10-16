@@ -5,13 +5,14 @@ use std::ops::Range;
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape, Vec2};
 use unicode_bidi::{BidiInfo, Level};
 use vectorcraft_doc::{
-    Burasagari, CharStyle, InlineArt, Justify, Kinsoku, LeadingModel, Mojikumi, ParaDirection, ParaStyle, PathAlign, PathEffect, TextKind, TextObject,
+    Burasagari, CharStyle, HyphenationOptions, InlineArt, Justify, Kinsoku, LeadingModel, Mojikumi, ParaDirection, ParaStyle, PathAlign, PathEffect,
+    TextKind, TextObject,
 };
 use vectorcraft_geom::{ArcPath, PathData};
 
 use crate::composer::{Breakpoint, Params, compose};
 use crate::fontdb::FontDb;
-use crate::hyphen::hyphen_points;
+use crate::hyphen::hyphen_points_with;
 use crate::shape::{
     Punct, SGlyph, Tcy, cap_x_heights, hyphen_glyph, is_cjk, mark_word_ends, no_line_end, no_line_start, punct, shape_range, soft_line_start,
     style_metrics,
@@ -571,6 +572,8 @@ const QUARTER_TURN: Affine = Affine::new([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]);
 /// forms come from the font's `vert` feature); Latin letters, digits and other characters lie on
 /// their side. Brackets, the long vowel mark and similar marks that need a vertical form lie on
 /// their side when the font has none (Unicode's Vertical_Orientation Tr).
+/// Fullwidth !/? instead keep the nominal glyph upright (Tu fallback, UAX #50 §3.1):
+/// <https://www.unicode.org/reports/tr50/#vo>.
 fn stands_upright(g: &SGlyph) -> bool {
     let c = g.ch as u32;
     let upright = matches!(c,
@@ -587,7 +590,7 @@ fn stands_upright(g: &SGlyph) -> bool {
     }
     let needs_vertical_form = matches!(c,
         0x3001 | 0x3002 | 0x3008..=0x3011 | 0x3013..=0x301F | 0x3030 | 0x30A0 | 0x30FC
-        | 0xFE50..=0xFE52 | 0xFE59..=0xFE5E | 0xFF01 | 0xFF08 | 0xFF09 | 0xFF0C | 0xFF0E | 0xFF1A | 0xFF1B | 0xFF1F
+        | 0xFE50..=0xFE52 | 0xFE59..=0xFE5E | 0xFF08 | 0xFF09 | 0xFF0C | 0xFF0E | 0xFF1A | 0xFF1B
         | 0xFF3B | 0xFF3D | 0xFF3F | 0xFF5B..=0xFF60 | 0xFFE3);
     // Without a vertical alternate the shaped glyph is the nominal one.
     !needs_vertical_form || g.gid != g.face.glyph_for(g.ch)
@@ -746,17 +749,20 @@ fn align_vertically(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, re
     }
 }
 
+/// A flattened text wrap shape: (polygons, offset, invert).
+type FlatWrap = (Vec<Vec<Point>>, f64, bool);
+
 /// One cell of a flattened area-type frame (the whole frame, or one row/column of it).
 struct Region {
     /// The cell (frame bounds, or a grid cell of them).
     cell: Rect,
     /// Inset applied inside the frame edges.
     inset: f64,
-    polys: Vec<Vec<Point>>,
+    polys: std::sync::Arc<[Vec<Point>]>,
     /// The frame is its own bounding rectangle (spans need no polygon intersection).
     rect: bool,
-    /// Text Wrap shapes: (polygons, offset, invert).
-    wraps: Vec<(Vec<Vec<Point>>, f64, bool)>,
+    /// Text Wrap shapes.
+    wraps: std::sync::Arc<[FlatWrap]>,
     /// Vertical alignment: how far below the top-aligned position the first line starts.
     shift: f64,
     /// Vertical justification: extra space added between consecutive lines.
@@ -865,7 +871,9 @@ impl Region {
     fn cells(path: &BezPath, opts: &LayoutOptions, wrap: &[vectorcraft_doc::WrapShape]) -> Vec<Region> {
         // A frame out of range has no cells, and a wrap shape out of range is left out.
         let Some(polys) = polygons(path) else { return vec![] };
-        let wraps: Vec<(Vec<Vec<Point>>, f64, bool)> = wrap
+        // Every cell shares one copy of the frame's polygons and one copy of the text wrap shapes.
+        let polys: std::sync::Arc<[Vec<Point>]> = polys.into();
+        let wraps: std::sync::Arc<[FlatWrap]> = wrap
             .iter()
             .filter_map(|w| Some((polygons(&w.path.to_bezpath())?, w.wrap.offset.max(0.0), w.wrap.invert)))
             .filter(|w| !w.0.is_empty())
@@ -875,7 +883,8 @@ impl Region {
             let area: f64 = polys[0].iter().zip(polys[0].iter().cycle().skip(1)).map(|(a, b)| a.x * b.y - b.x * a.y).sum::<f64>().abs() * 0.5;
             (area - bbox.area()).abs() <= bbox.area() * 1e-6 + 1e-9
         };
-        let (rows, cols) = (opts.rows.max(1), opts.columns.max(1));
+        let max = vectorcraft_doc::AreaOptions::MAX_ROWS_COLUMNS;
+        let (rows, cols) = (opts.rows.clamp(1, max), opts.columns.clamp(1, max));
         let gutter = opts.gutter.max(0.0);
         let cw = ((bbox.width() - gutter * (cols - 1) as f64) / cols as f64).max(0.0);
         let rh = ((bbox.height() - gutter * (rows - 1) as f64) / rows as f64).max(0.0);
@@ -903,7 +912,7 @@ impl Region {
     /// inside them, for Invert Wrap). Offsets grow each wrap shape vertically and horizontally.
     fn intervals(&self, y: f64) -> Vec<(f64, f64)> {
         let mut iv = if self.polys.is_empty() || self.rect { vec![(self.cell.x0, self.cell.x1)] } else { poly_intervals(&self.polys, y) };
-        for (polys, off, invert) in &self.wraps {
+        for (polys, off, invert) in self.wraps.iter() {
             let ys = if *off > 0.0 { vec![y - off, y - off * 0.5, y, y + off * 0.5, y + off] } else { vec![y] };
             let w = union_intervals(ys.into_iter().flat_map(|y| poly_intervals(polys, y)).map(|(a, b)| (a - off, b + off)).collect());
             iv = if *invert { intersect_intervals(&iv, &w) } else { subtract_intervals(&iv, &w) };
@@ -955,6 +964,21 @@ impl Region {
             })
             .collect()
     }
+}
+
+/// The 10,000 cells of a frame in 100 rows and 100 columns share one copy of the frame's polygons
+/// and one copy of the text wrap shapes.
+#[cfg(test)]
+#[test]
+fn the_cells_of_a_frame_share_its_polygons_and_the_wrap_shapes() {
+    let frame = kurbo::Circle::new((0.0, 0.0), 1000.0).to_path(0.1);
+    let square = PathData::from_bezpath(&Rect::new(-10.0, -10.0, 10.0, 10.0).to_path(0.1));
+    let wrap = vectorcraft_doc::WrapShape { path: square, wrap: Default::default() };
+    let cells = Region::cells(&frame, &LayoutOptions { rows: 100, columns: 100, ..LayoutOptions::default() }, &[wrap]);
+    assert_eq!(cells.len(), 10_000);
+    let first = &cells[0];
+    assert!(!first.polys.is_empty() && !first.wraps.is_empty());
+    assert!(cells.iter().all(|c| c.polys.as_ptr() == first.polys.as_ptr() && c.wraps.as_ptr() == first.wraps.as_ptr()));
 }
 
 /// Vertical metrics of a line: (ascent, descent, leading, cap height, x height).
@@ -1197,7 +1221,18 @@ fn word_width(g: &[SGlyph], i: usize) -> f64 {
 
 /// Greedy break: returns (end glyph index, hyphenated) for a line starting at `i` of `width`.
 /// With burasagari, a comma or full stop that doesn't fit ends the line, hanging outside it.
-fn break_line(text: &str, g: &[SGlyph], i: usize, width: f64, hyphenate: bool, burasagari: Burasagari, kinsoku: Kinsoku) -> (usize, bool) {
+/// `hyphenate` holds the paragraph's Hyphenation options and the Hyphenation Zone in force when
+/// the line may hyphenate a word; a line whose text before the overflowing word already ends
+/// within the zone breaks before that word.
+fn break_line(
+    text: &str,
+    g: &[SGlyph],
+    i: usize,
+    width: f64,
+    hyphenate: Option<(&HyphenationOptions, f64)>,
+    burasagari: Burasagari,
+    kinsoku: Kinsoku,
+) -> (usize, bool) {
     if !width.is_finite() {
         return (g.len(), false);
     }
@@ -1240,13 +1275,24 @@ fn break_line(text: &str, g: &[SGlyph], i: usize, width: f64, hyphenate: bool, b
     }
     // Hyphenate the word that overflows.
     let word_start = last_break.map_or(i, |b| b.0);
-    if hyphenate && g[j].is_letter() {
+    let in_zone = |zone: f64| {
+        let mut te = word_start;
+        while te > i && g[te - 1].is_space() {
+            te -= 1;
+        }
+        te > i && zone > 0.0 && width - g[i..te].iter().map(|g| g.adv).sum::<f64>() <= zone + EPS
+    };
+    if let Some((opts, zone)) = hyphenate
+        && g[j].is_letter()
+        && !in_zone(zone)
+    {
         let mut we = j;
         while we < g.len() && !g[we].is_space() && !g[we].break_after() {
             we += 1;
         }
         let x_ws: f64 = g[i..word_start].iter().map(|g| g.adv).sum();
-        let pts: Vec<usize> = hyphen_breaks(text, g, word_start, we).into_iter().filter(|&k| k > 0 && kinsoku_allows(g, k - 1, kinsoku)).collect();
+        let pts: Vec<usize> =
+            hyphen_breaks(text, g, word_start, we, opts).into_iter().filter(|&k| k > 0 && kinsoku_allows(g, k - 1, kinsoku)).collect();
         for &k in pts.iter().rev() {
             if k <= j && k > i {
                 let w = x_ws + g[word_start..k].iter().map(|g| g.adv).sum::<f64>() + hyphen_glyph(&g[k - 1]).adv;
@@ -1344,7 +1390,7 @@ mod wrapping_tests {
         let text = "بَت";
         let glyphs = synthetic_glyphs(&[(0, 4, 2.0, 'ب'), (0, 4, 2.0, 'ب'), (4, 2, 1.0, 'ت')]);
 
-        let (end, hyphenated) = break_line(text, &glyphs, 0, 3.0, false, Burasagari::None, Kinsoku::Hard);
+        let (end, hyphenated) = break_line(text, &glyphs, 0, 3.0, None, Burasagari::None, Kinsoku::Hard);
 
         assert!(!hyphenated);
         assert_eq!(end, 2, "oversized base-plus-mark cluster must stay together");
@@ -1357,11 +1403,11 @@ mod wrapping_tests {
         let text = "بَتَث";
         let glyphs = synthetic_glyphs(&[(0, 4, 1.0, 'ب'), (4, 4, 2.0, 'ت'), (4, 4, 2.0, 'ت'), (8, 2, 1.0, 'ث')]);
 
-        let (first_end, _) = break_line(text, &glyphs, 0, 3.0, false, Burasagari::None, Kinsoku::Hard);
+        let (first_end, _) = break_line(text, &glyphs, 0, 3.0, None, Burasagari::None, Kinsoku::Hard);
         assert_eq!(first_end, 1);
         assert_eq!(source_range(&glyphs, 0, first_end), 0..4);
 
-        let (second_end, hyphenated) = break_line(text, &glyphs, first_end, 3.0, false, Burasagari::None, Kinsoku::Hard);
+        let (second_end, hyphenated) = break_line(text, &glyphs, first_end, 3.0, None, Burasagari::None, Kinsoku::Hard);
 
         assert!(!hyphenated);
         assert_eq!(second_end, 3, "oversized cluster at the next line start must stay together");
@@ -1450,8 +1496,8 @@ fn soft_kinsoku_lets_small_kana_and_the_prolonged_sound_mark_start_a_line() {
     }
 }
 
-/// Glyph indices inside `g[ws..we]` (a word) where a hyphenated break may go.
-fn hyphen_breaks(text: &str, g: &[SGlyph], ws: usize, we: usize) -> Vec<usize> {
+/// Glyph indices inside `g[ws..we]` (a word) where a hyphenated break may go under `opts`.
+fn hyphen_breaks(text: &str, g: &[SGlyph], ws: usize, we: usize, opts: &HyphenationOptions) -> Vec<usize> {
     // Strip leading/trailing punctuation (quotes, commas).
     let (mut a, mut b) = (ws, we);
     while a < b && !g[a].is_letter() {
@@ -1466,7 +1512,7 @@ fn hyphen_breaks(text: &str, g: &[SGlyph], ws: usize, we: usize) -> Vec<usize> {
     let (s, e) = (g[a].byte, g[b - 1].byte + g[b - 1].len);
     let Some(word) = text.get(s..e) else { return vec![] };
     let offs: Vec<usize> = word.char_indices().map(|(o, _)| s + o).collect();
-    hyphen_points(word)
+    hyphen_points_with(word, opts)
         .into_iter()
         .filter_map(|ci| {
             let byte = *offs.get(ci)?;
@@ -1476,15 +1522,18 @@ fn hyphen_breaks(text: &str, g: &[SGlyph], ws: usize, we: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Break candidates for the every-line composer.
-fn candidates(text: &str, g: &[SGlyph], hyphenate: bool, kinsoku: Kinsoku) -> Vec<Breakpoint> {
+/// Break candidates for the every-line composer: hyphenation points under `hyphenate` (the
+/// paragraph's Hyphenation options) when it is given.
+fn candidates(text: &str, g: &[SGlyph], hyphenate: Option<&HyphenationOptions>, kinsoku: Kinsoku) -> Vec<Breakpoint> {
     let mut v = vec![];
     let mut ws = 0;
     for (j, gl) in g.iter().enumerate() {
         let end_of_word = gl.is_space() || gl.break_after();
         if end_of_word {
-            if hyphenate && j > ws {
-                for k in hyphen_breaks(text, g, ws, j).into_iter().filter(|&k| k > 0 && kinsoku_allows(g, k - 1, kinsoku)) {
+            if let Some(opts) = hyphenate
+                && j > ws
+            {
+                for k in hyphen_breaks(text, g, ws, j, opts).into_iter().filter(|&k| k > 0 && kinsoku_allows(g, k - 1, kinsoku)) {
                     v.push(Breakpoint { end: k, hyphen: hyphen_glyph(&g[k - 1]).adv });
                 }
             }
@@ -1495,8 +1544,10 @@ fn candidates(text: &str, g: &[SGlyph], hyphenate: bool, kinsoku: Kinsoku) -> Ve
             ws = j + 1;
         }
     }
-    if hyphenate && g.len() > ws {
-        for k in hyphen_breaks(text, g, ws, g.len()).into_iter().filter(|&k| k > 0 && kinsoku_allows(g, k - 1, kinsoku)) {
+    if let Some(opts) = hyphenate
+        && g.len() > ws
+    {
+        for k in hyphen_breaks(text, g, ws, g.len(), opts).into_iter().filter(|&k| k > 0 && kinsoku_allows(g, k - 1, kinsoku)) {
             v.push(Breakpoint { end: k, hyphen: hyphen_glyph(&g[k - 1]).adv });
         }
     }
@@ -1548,9 +1599,10 @@ fn compose_para(cx: &Ctx<'_>, sg: &[SGlyph], para: &ParaStyle, pen: &Pen<'_>, rt
     let width = |k: usize| widths.get(k).copied().unwrap_or(last);
     // Lines from `uniform_from` on are interchangeable (same width).
     let uniform_from = widths.iter().rposition(|&w| (w - last).abs() > EPS).map_or(0, |k| k + 1);
-    let cands = candidates(cx.text, sg, para.hyphenate, para.kinsoku);
+    let cands = candidates(cx.text, sg, para.hyphenate.then_some(&para.hyphenation), para.kinsoku);
     let justify_last = para.justify == Justify::JustifyAll;
-    let params = |tolerance| Params { justify_last, ragged, tolerance, uniform_from };
+    let hyphen_limit = usize::try_from(para.hyphenation.hyphen_limit).unwrap_or(usize::MAX);
+    let params = |tolerance| Params { justify_last, ragged, tolerance, uniform_from, hyphen_limit };
     // Ragged: first look for breaks that leave at most one rag zone (a sixth of the width) on
     // each line, then accept any lines that fit.
     let (strict, loose) = if ragged { (1.0, f64::INFINITY) } else { (1.0, 4.0) };
@@ -1606,6 +1658,11 @@ fn flow(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, regions: Optio
         }
         let n = sg.len();
         let composed = compose_para(cx, &sg, para, &pen, rtl);
+        // Hyphenation options: the Hyphenation Zone applies with the Single-line Composer, and the
+        // Hyphen Limit counts the lines in a row that end with a hyphen.
+        let zone = if cx.opts.composer.unwrap_or(para.composer) == Composer::SingleLine { para.hyphenation.zone } else { 0.0 };
+        let hyphen_limit = usize::try_from(para.hyphenation.hyphen_limit).unwrap_or(usize::MAX);
+        let mut hyphen_run = 0;
         let mut li_para = 0;
         let mut i = 0;
         loop {
@@ -1635,9 +1692,10 @@ fn flow(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, regions: Optio
                     break 'paras;
                 };
                 let width = x1 - x0 - ind_l - para.right_indent;
+                let hyphenate = (para.hyphenate && (hyphen_limit == 0 || hyphen_run < hyphen_limit)).then_some((&para.hyphenation, zone));
                 let (end, hyph) = match composed.as_ref().and_then(|c| c.get(li_para)) {
                     Some(&(e, h)) if e > i => (e, h),
-                    _ if i < n => break_line(cx.text, &sg, i, width, para.hyphenate, para.burasagari, para.kinsoku),
+                    _ if i < n => break_line(cx.text, &sg, i, width, hyphenate, para.burasagari, para.kinsoku),
                     _ => (n, false),
                 };
                 let m = Metrics::max(&sg[i..end]).unwrap_or(pm);
@@ -1662,6 +1720,7 @@ fn flow(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, regions: Optio
                 }
                 break (baseline, x0, x1, end, hyph, m);
             };
+            hyphen_run = if hyph && end > i { hyphen_run + 1 } else { 0 };
             let (ax0, ax1) = if regions.is_some() { (x0 + ind_l, x1 - para.right_indent) } else { (x0, x1) };
             let width = ax1 - ax0;
             pen.pending = 0.0;
@@ -1815,6 +1874,7 @@ fn flow(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, regions: Optio
                 x1: x_end,
                 ascent: m.asc,
                 descent: m.desc,
+                first_baseline: if pen.model == LeadingModel::EmBoxTop { m.top.max(pen.fb_min) } else { m.first_baseline(pen.fb, pen.fb_min) },
                 start: if i < n { sg[i].byte } else { pr.start },
                 end: if last_of_para { pr.end } else { sg[end].byte },
                 glyph_start,
@@ -1894,6 +1954,7 @@ fn on_path(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, path: &Path
             x1: 0.0,
             ascent: m.0,
             descent: m.1,
+            first_baseline: 0.0,
             start: 0,
             end: text_len,
             glyph_start: 0,
@@ -1979,6 +2040,7 @@ fn on_path(cx: &mut Ctx<'_>, paras: &[Range<usize>], t: &TextObject, path: &Path
         x1: pe.x,
         ascent: m.0,
         descent: m.1,
+        first_baseline: 0.0,
         start: 0,
         end: text_len,
         glyph_start: 0,
