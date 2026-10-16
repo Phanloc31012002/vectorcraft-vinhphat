@@ -11,6 +11,12 @@ use crate::state::View;
 use crate::theme::{self, Tokens};
 use crate::{CacheKey, VectorcraftApp, now_ms, widgets};
 
+// DanCard fork (IN Vĩnh Phát): a heavy document's art at a lower resolution where the frame doesn't
+// reach yet (`dancard_backdrop.rs`).
+#[path = "dancard_backdrop.rs"]
+mod backdrop;
+pub(crate) use backdrop::Backdrop;
+
 const RULER: f32 = 16.0;
 
 /// Screen ↔ document mapping for one frame.
@@ -324,6 +330,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             rich_black: key.rich_black,
             ..opts
         };
+        // DanCard fork: the art the backdrop shows.
+        app.canvas.backdrop.note(&key, &doc, &opts);
         // Light documents render synchronously (no lag vs overlays); heavy ones go to the worker.
         // A document switch renders synchronously so another document's frame is never shown.
         // The first frame after an interaction, when the frame shown drew moved rasters, also goes
@@ -344,6 +352,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             }
         }
     }
+    // DanCard fork: the backdrop, where the frame doesn't reach.
+    backdrop::pump(app, ui.ctx());
+    backdrop::draw(app, &painter, &xf, &key);
     if let (Some(tex), Some(k)) = (&app.canvas.texture, &app.canvas.key)
         && k.doc == key.doc
     {

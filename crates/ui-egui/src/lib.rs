@@ -295,6 +295,9 @@ pub struct CanvasCache {
     pub selection_bounds: Option<((u64, u64), Option<vectorcraft_geom::Rect>)>,
     /// The tools' cursors as OS cursor bitmaps.
     pub cursors: cursors::Images,
+    /// DanCard fork: a heavy document's art at a lower resolution, shown where the frame doesn't
+    /// reach yet (`dancard_backdrop.rs`).
+    pub(crate) backdrop: canvas::Backdrop,
 }
 
 /// [`CanvasCache::slices`]: the layout of the slices of (document uid, revision).
@@ -485,6 +488,7 @@ impl VectorcraftApp {
                 selection_box: None,
                 selection_bounds: None,
                 cursors: Default::default(),
+                backdrop: Default::default(),
             },
             perf: Perf::default(),
             titlebar_inset: 0.0,
