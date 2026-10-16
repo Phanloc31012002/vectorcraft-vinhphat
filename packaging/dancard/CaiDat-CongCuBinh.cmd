@@ -2,7 +2,8 @@
 rem Cong cu binh (DanCard tren VectorCraft, ban cua IN Vinh Phat): cai vao AppData cua nguoi dung
 rem nay, tu cap nhat tu Releases cua fork. Bam dup de cai lan dau, hoac de cai lai ban moi nhat.
 rem Khong can quyen admin. Phan PowerShell nam sau dong danh dau ben duoi.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='%~f0'; $s=[IO.File]::ReadAllText($f,[Text.Encoding]::UTF8); $i=$s.IndexOf('#'+'POWERSHELL'); Invoke-Expression $s.Substring($i)"
+set "CCB_SELF=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=[IO.File]::ReadAllText($env:CCB_SELF,[Text.Encoding]::UTF8); $i=$s.IndexOf('#'+'POWERSHELL'); Invoke-Expression $s.Substring($i)"
 echo.
 pause
 exit /b
@@ -25,6 +26,15 @@ function Ensure-Key([string] $path) {
   if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
 }
 
+# Đổi tên/chuyển thư mục `from` thành `to` (chưa có), thử lại vài lần: phần mềm diệt virus có thể
+# đang quét file vừa giải nén.
+function Move-WithRetry([string] $from, [string] $to) {
+  for ($i = 1; ; $i++) {
+    try { Move-Item -LiteralPath $from -Destination $to -ErrorAction Stop; return }
+    catch { if ($i -ge 10) { throw }; Start-Sleep -Milliseconds (300 * $i) }
+  }
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $work | Out-Null
   Write-Host 'Dang lay thong tin ban moi nhat...'
@@ -41,7 +51,7 @@ try {
   if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne ([string]$latest.sha256).ToUpperInvariant()) {
     throw 'File tai ve bi loi (SHA-256 khong khop): chay lai file nay.'
   }
-  $running = Get-Process -Name vectorcraft -ErrorAction SilentlyContinue |
+  $running = Get-Process -Name vectorcraft, vectorcraft-cli -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($app, [StringComparison]::OrdinalIgnoreCase) }
   if ($running) { throw 'App dang mo: dong app roi chay lai file nay.' }
   # Dấu của các lần cập nhật trước (bản đã tải, bản đang thử, bản bị trả lại) thuộc về bản cũ.
@@ -52,10 +62,19 @@ try {
   Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force
   $exe = Get-ChildItem -LiteralPath $unpack -Filter 'vectorcraft.exe' -Recurse | Select-Object -First 1
   if (-not $exe) { throw 'Trong file tai ve khong co vectorcraft.exe' }
-  if (Test-Path -LiteralPath $app) { Remove-Item -LiteralPath $app -Recurse -Force }
-  Move-Item -LiteralPath $exe.DirectoryName -Destination $app
+  # Bản đang cài sang một bên trước, bản mới vào chỗ, rồi mới xóa bản cũ: hỏng giữa chừng thì bản cũ
+  # quay lại, máy không bao giờ mất app.
+  $prev = Join-Path $root 'app.prev'
+  if (Test-Path -LiteralPath $prev) { Remove-Item -LiteralPath $prev -Recurse -Force }
+  if (Test-Path -LiteralPath $app) { Move-WithRetry $app $prev }
+  try {
+    Move-WithRetry $exe.DirectoryName $app
+  } catch {
+    if (Test-Path -LiteralPath $prev) { Move-WithRetry $prev $app }
+    throw
+  }
   Set-Content -LiteralPath (Join-Path $app 'build.txt') -Value $latest.build -Encoding Ascii
-  Remove-Item -LiteralPath $unpack, $zip, $json -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $prev, $unpack, $zip, $json -Recurse -Force -ErrorAction SilentlyContinue
   $target = Join-Path $app 'vectorcraft.exe'
 
   # Lối tắt trên Desktop và trong Start.

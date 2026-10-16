@@ -3,11 +3,14 @@
 # Kết quả: artifact `dancard-vectorcraft-windows-x64` chứa vectorcraft-<ver>-windows-x64-portable.zip
 # (vectorcraft.exe + vectorcraft-cli.exe) và bản cài .msi, chưa ký số (fork không có chứng chỉ).
 # Build trên nhánh `dancard` còn được đăng lên Releases (tag dancard-b<số lần chạy>, đánh dấu
-# Latest), sau khi thử app trong zip chạy được và mang đúng số bản: CongCuBinh-windows-x64.zip,
-# .msi, latest.json (số bản, địa chỉ zip, SHA-256) và CaiDat-CongCuBinh.cmd. App cài bằng file đó
-# (AppData của từng máy) tự tải bản mới từ đây (apps/vectorcraft/src/dancard_update.rs); số bản là
-# số lần chạy của workflow này (DANCARD_BUILD). Đừng đổi tên file này: số lần chạy sẽ đếm lại từ 1,
-# nhỏ hơn bản các máy đang có, nên không máy nào nhận bản mới nữa.
+# Latest khi là bản lớn nhất), sau khi thử app trong zip chạy được và mang đúng số bản:
+# CongCuBinh-windows-x64.zip, .msi, latest.json (số bản, địa chỉ zip, SHA-256) và
+# CaiDat-CongCuBinh.cmd. App cài bằng file đó (AppData của từng máy) tự tải bản mới từ đây
+# (apps/vectorcraft/src/dancard_update.rs); số bản là số lần chạy của workflow này (DANCARD_BUILD).
+# Đừng đổi tên file này: số lần chạy sẽ đếm lại từ 1, nhỏ hơn bản các máy đang có, nên không máy
+# nào nhận bản mới nữa.
+# Job build không có quyền ghi vào repo (mã của các crate phụ thuộc chạy trong lúc build); chỉ job
+# `release` nhỏ phía sau, chỉ tải lên các file job build đã làm, mới có quyền đó.
 # Các bước chép từ job `windows` của release.yml upstream, bỏ phần ký số và font CJK.
 name: DanCard Windows x64
 
@@ -19,14 +22,19 @@ on:
 permissions:
   contents: read
 
+# Mỗi lúc một lần chạy: lần sau đợi lần trước đăng xong, nên bản Latest không bị lùi lại.
+concurrency:
+  group: dancard-windows-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows-x64:
     runs-on: windows-latest
     timeout-minutes: 120
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -49,11 +57,10 @@ jobs:
           name: dancard-vectorcraft-windows-x64
           path: dist/release/*
           if-no-files-found: error
-      - name: Đăng lên Releases (bản cho các máy tự cập nhật)
+      - name: Chuẩn bị các file đăng (thử app trong zip chạy được và mang đúng số bản)
         if: github.ref == 'refs/heads/dancard'
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
           BUILD: ${{ github.run_number }}
         run: |
           # Tiếng Việt trong tiêu đề commit (git in ra UTF-8) đọc đúng.
@@ -62,32 +69,74 @@ jobs:
           $zip = Get-ChildItem dist/release/*-portable.zip | Select-Object -First 1
           $msi = Get-ChildItem dist/release/*.msi | Select-Object -First 1
           if (-not $zip -or -not $msi) { throw 'no portable zip or msi in dist/release' }
-          Copy-Item $zip.FullName CongCuBinh-windows-x64.zip
+          New-Item -ItemType Directory -Force publish/files | Out-Null
+          Copy-Item $zip.FullName publish/files/CongCuBinh-windows-x64.zip
+          Copy-Item $msi.FullName publish/files/
+          Copy-Item packaging/dancard/CaiDat-CongCuBinh.cmd publish/files/
           # Thử đúng file sẽ đăng: app trong zip chạy được và mang số bản này (không có số bản thì
           # các máy cài sẽ không bao giờ tự cập nhật).
-          Expand-Archive CongCuBinh-windows-x64.zip -DestinationPath smoke
+          Expand-Archive publish/files/CongCuBinh-windows-x64.zip -DestinationPath smoke
           $exe = Get-ChildItem smoke -Recurse -Filter vectorcraft.exe | Select-Object -First 1
           if (-not $exe) { throw 'no vectorcraft.exe in the portable zip' }
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '--version' -Wait -PassThru -NoNewWindow -RedirectStandardOutput smoke-version.txt
           $version = "$(Get-Content smoke-version.txt -Raw)".Trim()
           if ($p.ExitCode -ne 0 -or $version -notmatch "\(DanCard build $env:BUILD\)$") { throw "vectorcraft.exe --version: exit $($p.ExitCode), '$version'" }
           Write-Output "ok $version"
-          $sha = (Get-FileHash CongCuBinh-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sha = (Get-FileHash publish/files/CongCuBinh-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           [ordered]@{
             build  = [int64]$env:BUILD
             commit = $env:GITHUB_SHA
             url    = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/CongCuBinh-windows-x64.zip"
             sha256 = $sha
-          } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM latest.json
-          Copy-Item packaging/dancard/CaiDat-CongCuBinh.cmd .
-          $files = @('CongCuBinh-windows-x64.zip', $msi.FullName, 'latest.json', 'CaiDat-CongCuBinh.cmd')
-          # Chạy lại (Re-run) một lần chạy đã đăng: cùng số bản, chỉ thay các file.
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM publish/files/latest.json
+          "$(git log -1 --format=%s $env:GITHUB_SHA)" | Set-Content -Encoding utf8NoBOM publish/subject.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.ref == 'refs/heads/dancard'
+        with:
+          name: dancard-release
+          path: publish/
+          if-no-files-found: error
+
+  # Đăng lên Releases (bản cho các máy tự cập nhật): chỉ tải lên các file job build đã làm và thử.
+  release:
+    needs: windows-x64
+    if: github.ref == 'refs/heads/dancard'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dancard-release
+          path: publish
+      - name: Đăng lên Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = "dancard-b$env:BUILD"
+          $files = Get-ChildItem publish/files | ForEach-Object { $_.FullName }
+          if ($files.Count -ne 4) { throw "expected 4 files to publish, got $($files.Count)" }
+          # Latest chỉ khi không có bản nào lớn hơn (chạy lại một lần chạy cũ không làm lùi bản các
+          # máy cài mới nhận được).
+          $tags = gh release list --repo $repo --limit 1000 --json tagName --jq '.[].tagName'
+          if ($LASTEXITCODE -ne 0) { throw "gh release list failed ($LASTEXITCODE)" }
+          $newest = ($tags | Where-Object { $_ -match '^dancard-b(\d+)$' } | ForEach-Object { [int64]($_ -replace '^dancard-b', '') } | Measure-Object -Maximum).Maximum
+          $latest = if ($newest -and [int64]$newest -gt [int64]$env:BUILD) { '--latest=false' } else { '--latest' }
+          gh release view $tag --repo $repo --json isDraft *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber @files
+            # Chạy lại (Re-run): cùng số bản, chỉ thay các file; bản nháp một lần chạy bị hủy để lại
+            # thì đăng ra.
+            gh release upload $tag --repo $repo --clobber @files
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
+            gh release edit $tag --repo $repo --draft=false $latest
           } else {
-            $notes = "$(git log -1 --format=%s $env:GITHUB_SHA)`n`nCài lần đầu: tải CaiDat-CongCuBinh.cmd rồi bấm đúp. Máy đã cài tự lên bản này."
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --latest `
+            $subject = "$(Get-Content publish/subject.txt -Raw -Encoding utf8)".Trim()
+            $notes = "$subject`n`nCài lần đầu: tải CaiDat-CongCuBinh.cmd rồi bấm đúp. Máy đã cài tự lên bản này."
+            gh release create $tag --repo $repo --target $env:GITHUB_SHA $latest `
               --title "Công cụ bình bản $env:BUILD (alpha)" --notes $notes @files
           }
           if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }
@@ -98,6 +147,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: wasm32-unknown-unknown

@@ -33,7 +33,7 @@ xung đột.
 | Mở file .ai / PDF giữ group | File của Illustrator mở bằng bản chỉnh sửa (editing data) nó mang theo: layer, group, clip group như trong Illustrator (VectorCraft gốc). Thêm: file có dấu đăng ký của máy cắt (toán tử `Ar`, độ phân giải đường) nay đọc được, trước đây mở theo trang PDF nên rã hết group. Bản chỉnh sửa vẽ khác trang PDF (VectorCraft chưa vẽ đúng vài kiểu Illustrator, vd. đường clip có màu nền) thì hình lấy từ trang PDF như trước nhưng được **gom lại thành group** theo cấu trúc của bản chỉnh sửa (`dancard_regroup.rs`: chỉ thêm group quanh những đoạn object liền nhau, không đổi thứ tự vẽ nên hình giữ nguyên); thông báo khi mở cho biết số group đã gom. File có ảnh lớn: bản chỉnh sửa giải nén ra hơn 256 MB (`binh card.ai` 217 MB: 352 MB) trước đây bị bỏ qua không báo nên rã hết group; bản này đọc tới 1 GB (`MAX_DATA` của `crates/eps`, bản 64-bit). |
 | Bảng kéo to nhỏ, kéo đi | Bảng mở từ cột icon kéo cạnh trái, cạnh dưới hay góc dưới trái (có vạch nắm) cho to nhỏ tùy ý, nhớ kích thước theo từng bảng (bấm đúp vào cạnh: về cỡ gốc); bảng Công cụ bình co giãn theo, thân cuộn trong khung. Kéo thanh tiêu đề của bảng ra là bảng thành cửa sổ nổi, giữ đúng cỡ đang có; cửa sổ nổi kéo đi bằng tab hay vạch nắm bên trái tab, kéo góc dưới phải (có vạch nắm) cho to nhỏ. Nhóm bảng nổi kiểu cũ cũng kéo cạnh phải, cạnh dưới, góc dưới phải được (`crates/ui-egui/src/dancard_panels.rs`). |
 | Một cửa sổ, nhiều tab | Mở file từ Explorer (bấm đúp, Open with, kéo lên biểu tượng) khi VectorCraft đang chạy thì file mở thành tab mới trong cửa sổ đang có, cửa sổ được đưa lên trước (`apps/vectorcraft/src/single_instance.rs`, Windows và Linux). Cửa sổ đang bận (lệnh dài) thì file mở ngay khi xong; app đang đóng thì lần mở này thành cửa sổ chính khi app cũ đóng xong; app treo, không nhận trong 5 giây thì file mở cửa sổ riêng như trước; không file nào mở hai lần. Muốn cửa sổ riêng thì chạy `vectorcraft --new-window`. |
-| Tự cập nhật (Windows) | Máy cài bằng `CaiDat-CongCuBinh.cmd` (xem [Cài và tự cập nhật](#cài-và-tự-cập-nhật-các-máy-trong-xưởng)) tự lên bản mới nhất ở Releases của fork: 30 giây sau khi mở rồi mỗi giờ, app đọc `latest.json`, tải ngầm bản mới hơn, kiểm SHA-256, giải nén sẵn; thanh trạng thái và chân panel báo "đã tải bản N". Lần mở app sau (khi không còn cửa sổ nào của app) bản mới thay file cũ rồi tự mở, cùng các file định mở. Lỗi giữa chừng thì giữ nguyên bản cũ. Bản mới chưa vẽ được cửa sổ sau 2 lần mở (lỗi khi khởi động) thì lần mở sau tự quay lại bản trước và không tải lại bản đó nữa, nên một bản hỏng không bắt cài lại từng máy. Không hỏi gì, không cần quyền admin (`apps/vectorcraft/src/dancard_update.rs`). Bản cài bằng .msi, bản giải nén zip ở chỗ khác và bản build tay không tự cập nhật. |
+| Tự cập nhật (Windows) | Máy cài bằng `CaiDat-CongCuBinh.cmd` (xem [Cài và tự cập nhật](#cài-và-tự-cập-nhật-các-máy-trong-xưởng)) tự lên bản mới nhất ở Releases của fork: 30 giây sau khi mở rồi mỗi giờ, app đọc `latest.json`, tải ngầm bản mới hơn, kiểm SHA-256, giải nén sẵn, mở thử `--version` (phải chạy được trên máy này và đúng số bản: phần mềm diệt virus giữ file, Windows thiếu gì thì biết ngay lúc này), ghi hẳn xuống đĩa; thanh trạng thái và chân panel báo "đã tải bản N". Lần mở app sau (khi không còn cửa sổ nào của app), trước mọi thứ khác, bản mới thay file cũ rồi tự mở, cùng các file định mở: danh sách file sắp đổi được ghi xuống đĩa trước (`update\swap.json`), file exe đổi sau cùng; lỗi giữa chừng thì trả lại ngay bản cũ, mất điện giữa chừng thì lần mở sau trả lại. Bản mới chưa vẽ được cửa sổ sau 2 lần mở (lỗi khi khởi động, kể cả lỗi rất sớm) thì lần mở sau tự quay lại bản trước và không tải lại bản đó nữa (quay lại dở dang thì lần mở sau làm tiếp), nên một bản hỏng không bắt cài lại từng máy; bản mới không mở nổi (phần mềm diệt virus lấy mất file) thì quay lại ngay. Các cửa sổ của app lần lượt dùng thư mục `update` (`update.lock`); mọi việc ghi vào `update\update.log`. Tải mà các bước sau hỏng 3 lần thì đợi một ngày mới thử lại bản đó. Không hỏi gì, không cần quyền admin (`apps/vectorcraft/src/dancard_update.rs`). Bản cài bằng .msi, bản giải nén zip ở chỗ khác và bản build tay không tự cập nhật. |
 | `dancard.importVariables` + tab **Variable** | Nhập file CSV/TXT thành Variables: mỗi cột một biến (cột `#` là biến ẩn/hiện: true/on hiện, false/off/trống ẩn, chữ khác hiện), mỗi dòng một bản ghi, tự gắn object trùng tên (hoặc ghi chú Attributes); giữ đúng dấu tiếng Việt (chuẩn hoá NFC, file Excel Windows-1258 cũng đọc được). Duyệt bản ghi trong bảng Variables. Viết lại theo đặc tả, không chép mã Variable Importer. |
 | `dancard.exportVariables` + tab **Variable** › Xuất file theo bản ghi | Như Batch của bảng Actions với nguồn Data Sets (bảng Actions của VectorCraft chưa có bước này): chọn thư mục lưu, PDF hoặc AI, tiền tố tên file, từ bản ghi … đến …; mỗi bản ghi áp lên **bản sao** của mẫu (như `dataset.select`: chữ, ẩn/hiện; object khóa / trong layer ẩn, khóa giữ nguyên) rồi lưu cả các artboard thành một file (PDF nhiều trang khi nhiều artboard). Tên file = tiền tố + tên bản ghi (chọn "Tên bản ghi theo cột" là cột số nhảy thì ra `001.pdf`, `002.pdf`…), ký tự Windows cấm thành `-`, trùng tên thêm ` (2)`. Không ghi đè file có sẵn trừ khi tick Ghi đè. Panel xuất mỗi khung hình một bản ghi: thanh tiến độ, nút Dừng, tài liệu bị sửa giữa chừng thì dừng; tài liệu đang mở không đổi, không thêm bước hoàn tác. |
 
@@ -102,10 +102,13 @@ GitHub Actions › **DanCard Windows x64** › Run workflow. Workflow cũng tự
 `dancard`. Kết quả là artifact chứa `vectorcraft-<ver>-windows-x64-portable.zip` và file `.msi`.
 Hai file này chưa ký số, nên Windows SmartScreen có thể cảnh báo khi mở.
 
-Build trên nhánh `dancard` còn được đăng lên **Releases** của fork, đánh dấu Latest, tag
-`dancard-b<N>` (N: số lần chạy của workflow, cũng là "bản N" ở chân panel và trong
-`vectorcraft --version`). Trước khi đăng, workflow mở thử `vectorcraft.exe --version` trong đúng zip
-sẽ đăng: không chạy được hay thiếu số bản thì không đăng gì. Release có:
+Build trên nhánh `dancard` còn được đăng lên **Releases** của fork, tag `dancard-b<N>` (N: số lần
+chạy của workflow, cũng là "bản N" ở chân panel và trong `vectorcraft --version`), đánh dấu Latest
+khi không có bản nào lớn hơn (chạy lại một lần chạy cũ không làm lùi bản các máy nhận). Mỗi lúc chỉ
+một lần chạy; lần sau đợi lần trước đăng xong. Trước khi đăng, workflow mở thử
+`vectorcraft.exe --version` trong đúng zip sẽ đăng: không chạy được hay thiếu số bản thì không đăng
+gì. Job build không có quyền ghi vào repo; chỉ job `release` nhỏ phía sau, tải lên đúng các file job
+build đã làm, mới có. Release có:
 
 | File | Dùng làm gì |
 |---|---|
@@ -120,7 +123,9 @@ sẽ đăng: không chạy được hay thiếu số bản thì không đăng g�
   (SmartScreen hỏi thì chọn More info › Run anyway). File tải bản mới nhất, kiểm SHA-256, cài vào
   `%LOCALAPPDATA%\CongCuBinh\app` (không cần admin), tạo lối tắt **Công cụ bình** trên Desktop và
   Start, thêm Công cụ bình vào Open with của .ai .eps .pdf .svg .vectorcraft (không đổi app mặc định),
-  rồi mở app. Chạy lại file này bất cứ lúc nào để cài lại bản mới nhất (đóng app trước).
+  rồi mở app. Chạy lại file này bất cứ lúc nào để cài lại bản mới nhất (đóng app trước); bản đang
+  cài chỉ bị xóa khi bản mới đã vào chỗ, hỏng giữa chừng thì bản cũ quay lại.
+- **Xem app đã tự cập nhật thế nào:** `%LOCALAPPDATA%\CongCuBinh\update\update.log`.
 - **Sau đó không phải làm gì:** mỗi lần `dancard` có build mới (push của Claude, hay workflow đồng bộ
   VectorCraft sáng thứ Hai), Releases có bản mới, các máy tự tải trong vòng một giờ và dùng từ lần mở
   app sau.
@@ -189,7 +194,7 @@ Chỉ những file này có thể đụng nhau khi gộp; mọi thứ khác là 
 | `crates/ui-egui/src/panel_docking.rs` | `PanelContent::body`: Công cụ bình tự cuộn trong khung cửa sổ; vạch nắm ở góc kéo cỡ của cửa sổ nổi |
 | `crates/eps/src/import/ai/read.rs`, `ai/tests.rs` | toán tử `Ar` (độ phân giải đường) vào `IGNORED`, kèm test |
 | `crates/eps/src/import/ai/mod.rs` | `MAX_DATA`: bản chỉnh sửa đọc tới 1 GB ở bản 64-bit (gốc 256 MB), bản web giữ 256 MB |
-| `apps/vectorcraft/src/main.rs` | một cửa sổ: `mod single_instance`, `--new-window`, mở file nhận được thành tab (`single_instance.rs` là file mới); tự cập nhật: `mod dancard_update` (file mới), `apply_pending` trước `single_instance::start`, `start_checker` và `set_build` khi tạo cửa sổ, `take_notice` trong `logic_frame`, `--version` in số bản |
+| `apps/vectorcraft/src/main.rs` | một cửa sổ: `mod single_instance`, `--new-window`, mở file nhận được thành tab (`single_instance.rs` là file mới); tự cập nhật: `mod dancard_update` (file mới), `may_apply` + `apply_pending` ở đầu `main` (trước khi đọc tham số, trước log), `start_checker` và `set_build` khi tạo cửa sổ, `take_notice` trong `logic_frame`, `--version` in số bản |
 | `apps/vectorcraft/Cargo.toml`, `Cargo.lock` | `sha2` cho app (kiểm SHA-256 bản tải về; cùng bản crate PDF đang dùng) |
 
 Khi sửa chỗ đụng nhau: giữ phần mới của VectorCraft, thêm lại đúng phần DanCard ghi ở bảng trên.

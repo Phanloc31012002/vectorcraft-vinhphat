@@ -649,6 +649,21 @@ fn native_options(custom_titlebar: bool) -> eframe::NativeOptions {
 }
 
 fn main() -> std::process::ExitCode {
+    // A newer build of the DanCard fork downloaded in the background replaces this one, a new build
+    // that doesn't start gives way to the one before it, or an update cut short is undone, and the
+    // build in place starts with the same arguments (`dancard_update`). First of all, before the
+    // arguments, the log or any window: a new build that fails even this early is rolled back.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if dancard_update::may_apply(&args)
+            && prefs_enabled()
+            && let Some(dir) = prefs_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            && dancard_update::apply_pending(&dir, &args)
+        {
+            return std::process::ExitCode::SUCCESS;
+        }
+    }
     // Validate roots before logging, font scans, preferences or the window: a missing value
     // must not clear an environment root and start the control channel without confinement.
     let mut control = automation_args::ControlArg::default();
@@ -698,18 +713,6 @@ fn main() -> std::process::ExitCode {
     };
     // Before desktop services, so every start-up warning is recorded (`logging`).
     let logger = logging::install();
-    // A newer build of the DanCard fork downloaded in the background replaces this one, or a new
-    // build that doesn't start gives way to the one before it, and that starts with the same
-    // arguments, before any window (`dancard_update`).
-    #[cfg(not(target_os = "macos"))]
-    if control_port.is_none()
-        && !new_window
-        && prefs_enabled()
-        && let Some(dir) = prefs_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        && dancard_update::apply_pending(&dir, &std::env::args_os().skip(1).collect::<Vec<_>>())
-    {
-        return std::process::ExitCode::SUCCESS;
-    }
     // A file opened while VectorCraft runs goes to its window as a tab: this launch ends here.
     #[cfg(not(target_os = "macos"))]
     if control_port.is_none()
