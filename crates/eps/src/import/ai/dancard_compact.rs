@@ -1,22 +1,24 @@
 //! DanCard fork (IN Vĩnh Phát): editing data too large to hold whole, decompressed with its images
-//! at a lower resolution.
+//! kept as JPEG files (or, where that isn't enough, at a lower resolution).
 //!
 //! A catalogue of photos can carry hundreds of MB of compressed editing data that decompresses to
-//! several GB (323 MB → 8.2 GB, nearly all of it the images' samples): more than [`super::MAX_DATA`], so
-//! the file opened from its PDF part alone (empty when its art lies outside the artboards), without
-//! its layers and groups. Here such data is decompressed as a stream, twice: once to learn its
-//! images ([`Pass::scan`]), then to keep everything but the images' samples as it is and write each
-//! image back at the resolution [`plan`] picks ([`Pass::write`]): each pixel the mean of the block
-//! of pixels it stands for, its operands (size, matrix) and `%%BeginData:` count rewritten so the
-//! reader reads it as any other image, in the same place. The resolution is the highest that keeps
-//! the whole within [`super::MAX_DATA`]: the images with the most pixels to the inch on the page come down
-//! first, to one resolution all of them share.
+//! several GB (323 MB → 8.2 GB, nearly all of it the images' samples): more than
+//! [`super::MAX_DATA`], so the file opened from its PDF part alone (empty when its art lies
+//! outside the artboards), without its layers and groups. Here such data is decompressed as a
+//! stream, twice: once to learn its images ([`Pass::scan`]), then to keep everything but the images'
+//! samples as it is and write each image back as [`plan`] says ([`Pass::write`]): a large image
+//! without an alpha channel as a JPEG file at quality [`JPEG_QUALITY`] (CMYK samples as a CMYK JPEG:
+//! the ink amounts kept), which the reader takes as it is; others as samples. Where even that
+//! doesn't fit, images come down to the highest resolution that does, each pixel the mean of the
+//! block of pixels it stands for: the images with the most pixels to the inch on the page first, to
+//! one resolution all of them share. The image's operands (size, matrix: the same place) and its
+//! `%%BeginData:` count are rewritten for what is written.
 //!
 //! The sections are found as the lexer finds them (`lex.rs`): a `%%BeginData: n` comment at a line's
 //! start, `XI` after it, the samples up to `%%EndData` near the `n` bytes counted from the end of
 //! the comment's line; placed files' previews and `%%BeginDocument` sections are copied whole.
 //! Only images of 8-bit samples written as binary, outside the copies for newer readers (`%_`), are
-//! lowered; anything else is copied as it is.
+//! written anew; anything else is copied as it is.
 
 use std::io::{self, Read};
 
@@ -33,23 +35,51 @@ const CHUNK: usize = 1 << 20;
 const MAX_SECTION: usize = 1 << 30;
 /// What an image's rewritten operands and comment add, at most (bytes).
 const OVERHEAD: u64 = 512;
+/// The quality images are kept as JPEG files at.
+const JPEG_QUALITY: u8 = 92;
+/// How much smaller than their samples JPEG files are taken to be, for a plan: first as they
+/// mostly are (at the quality above, photos come out 8 to 15 times smaller), then less, should
+/// they come out larger.
+const JPEG_RATIOS: [u64; 2] = [12, 6];
+/// Images of fewer bytes of samples stay samples (a JPEG file of a small logo saves little).
+#[cfg(not(test))]
+const JPEG_MIN_BYTES: u64 = 256 << 10;
+#[cfg(test)]
+const JPEG_MIN_BYTES: u64 = 1;
+/// Largest side of a JPEG file.
+const JPEG_MAX_SIDE: u64 = 65_535;
+/// The value of the image operands' `binary` (else 0 for hex, 1 for binary) that says the samples
+/// are a JPEG file, as this module writes them (read by `read::image`).
+pub(super) const JPEG_FILE: f64 = 2.0;
 
 const PREVIEW: (&[u8], &[u8]) = (b"%AI26_BeginPlacedObjectPreview", b"%AI26_EndPlacedObjectPreview");
 const DOCUMENT: (&[u8], &[u8]) = (b"%%BeginDocument", b"%%EndDocument");
 const END_DATA: &[u8] = b"%%EndData";
 
-/// `data` (compressed with `codec`) decompressed, its images lowered to fit in `max` bytes; the
-/// error of data too large when even the lowest resolution doesn't fit.
+/// `data` (compressed with `codec`) decompressed, its images kept as JPEG files or lowered to fit
+/// in `max` bytes; the error of data too large when even the lowest resolution doesn't fit.
 pub(super) fn decompress(codec: Codec, data: &[u8], max: u64) -> Result<Vec<u8>, String> {
     let mut scan = Pass::scan();
     scan.run(reader(codec, data))?;
-    let (ppi, plan) = plan(&scan.images, scan.len, max.saturating_sub(max / 8)).ok_or_else(too_large)?;
-    let lowered = plan.iter().any(Option::is_some);
-    let mut write = Pass::write(plan, max);
-    // The reader says so (after the first line, the header's).
-    write.note = lowered.then(|| format!("%{LOWERED} {}\n", ppi.round()));
-    write.run(reader(codec, data))?;
-    Ok(write.out)
+    let budget = max.saturating_sub(max / 8);
+    // As JPEG files first; when they come out larger than the plan took them to be, a plan that
+    // takes them to be larger; then as samples.
+    let ratios = JPEG_RATIOS.iter().map(|r| Some(*r)).chain([None]);
+    for ratio in ratios {
+        let jpeg = ratio.is_some();
+        let Some((ppi, plan)) = plan(&scan.images, scan.len, budget, ratio) else { continue };
+        let lowered = scan.images.iter().any(|(n, i)| plan.get(*n).copied().flatten().is_some_and(|w| w.size() != (i.w, i.h)));
+        let as_jpeg = plan.iter().any(|p| matches!(p, Some(Write::Jpeg(..))));
+        let mut write = Pass::write(plan, max);
+        // The reader says so (after the first line, the header's).
+        write.note = (lowered || as_jpeg).then(|| format!("%{LOWERED} {} {}\n", if lowered { ppi.round() } else { 0.0 }, u8::from(as_jpeg)));
+        match write.run(reader(codec, data)) {
+            Ok(()) => return Ok(write.out),
+            Err(e) if jpeg && e == too_large() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(too_large())
 }
 
 /// The comment that says the images were lowered, and to about how many pixels to the inch.
@@ -108,6 +138,9 @@ struct Image {
     h: u64,
     channels: u64,
     alpha: bool,
+    /// Its alpha channel is opaque inside its outermost pixels (pages exported with one: only the
+    /// last column, which the page's width cuts through, is partly see-through), or it has none.
+    opaque: bool,
     samples: u64,
     ppi: (f64, f64),
 }
@@ -118,7 +151,14 @@ impl Image {
         w.saturating_mul(h).saturating_mul(self.channels + u64::from(self.alpha))
     }
 
-    /// The size it is written at for a resolution of at most `ppi` (and [`MAX_PIXELS`]).
+    /// Kept as a JPEG file (in a plan that keeps them so): large, opaque (but for its outermost
+    /// pixels, which then show whole: a pixel's width at the image's edge).
+    fn jpegable(&self) -> bool {
+        self.opaque && matches!(self.channels, 1 | 3 | 4) && self.samples >= JPEG_MIN_BYTES
+    }
+
+    /// The size it is written at for a resolution of at most `ppi` (and [`MAX_PIXELS`], and sides
+    /// a JPEG file can have).
     fn at(&self, ppi: f64) -> (u64, u64) {
         let scale = |n: u64, have: f64| if have > ppi { ((n as f64) * ppi / have).ceil().max(1.0) as u64 } else { n };
         let (mut w, mut h) = (scale(self.w, self.ppi.0), scale(self.h, self.ppi.1));
@@ -126,14 +166,34 @@ impl Image {
             let f = (MAX_PIXELS as f64 / (w as f64 * h as f64)).sqrt();
             (w, h) = (((w as f64) * f).floor().max(1.0) as u64, ((h as f64) * f).floor().max(1.0) as u64);
         }
+        if w.max(h) > JPEG_MAX_SIDE {
+            let f = JPEG_MAX_SIDE as f64 / w.max(h) as f64;
+            (w, h) = (((w as f64) * f).floor().max(1.0) as u64, ((h as f64) * f).floor().max(1.0) as u64);
+        }
         (w.min(self.w), h.min(self.h))
     }
 }
 
+/// How an image is written: its samples at a size, or a JPEG file of that size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Write {
+    Samples(u64, u64),
+    Jpeg(u64, u64),
+}
+
+impl Write {
+    fn size(&self) -> (u64, u64) {
+        match *self {
+            Self::Samples(w, h) | Self::Jpeg(w, h) => (w, h),
+        }
+    }
+}
+
 /// The highest resolution at which all the data (`total` bytes as it is) fits in `budget`, found by
-/// halving, and the size each image (by its index among the sections) is written at there, `None`
-/// as it is; `None` when even [`MIN_PPI`] doesn't fit.
-fn plan(images: &[(usize, Image)], total: u64, budget: u64) -> Option<(f64, Sizes)> {
+/// halving, and how each image (by its index among the sections) is written there, `None` as it is:
+/// with a `jpeg` ratio, large images as JPEG files (taken to be that many times smaller than their
+/// samples). `None` when even [`MIN_PPI`] doesn't fit.
+fn plan(images: &[(usize, Image)], total: u64, budget: u64, jpeg: Option<u64>) -> Option<(f64, Sizes)> {
     let kept: u64 = images.iter().map(|(_, i)| i.samples).sum();
     let other = total.saturating_sub(kept);
     let size = |ppi: f64| -> u64 {
@@ -141,7 +201,8 @@ fn plan(images: &[(usize, Image)], total: u64, budget: u64) -> Option<(f64, Size
             .iter()
             .map(|(_, i)| {
                 let (w, h) = i.at(ppi);
-                i.bytes(w, h).min(i.samples) + OVERHEAD
+                let bytes = i.bytes(w, h).min(i.samples);
+                OVERHEAD + jpeg.filter(|_| i.jpegable()).map_or(bytes, |ratio| bytes / ratio.max(1))
             })
             .fold(other, u64::saturating_add)
     };
@@ -163,17 +224,16 @@ fn plan(images: &[(usize, Image)], total: u64, budget: u64) -> Option<(f64, Size
     let mut out = vec![None; count];
     for (n, i) in images {
         let (w, h) = i.at(ppi);
-        if (w, h) != (i.w, i.h)
-            && let Some(slot) = out.get_mut(*n)
-        {
-            *slot = Some((w, h));
+        let write = if jpeg.is_some() && i.jpegable() { Some(Write::Jpeg(w, h)) } else { ((w, h) != (i.w, i.h)).then_some(Write::Samples(w, h)) };
+        if let Some(slot) = out.get_mut(*n) {
+            *slot = write;
         }
     }
     Some((ppi, out))
 }
 
-/// The size each image (by its index among the sections) is written at, `None` as it is.
-type Sizes = Vec<Option<(u64, u64)>>;
+/// How each image (by its index among the sections) is written, `None` as it is.
+type Sizes = Vec<Option<Write>>;
 
 /// One pass over the decompressed data.
 struct Pass {
@@ -321,26 +381,31 @@ impl Pass {
             .and_then(|(_, text)| Operands::read(text))
             .and_then(|op| op.image(space, samples.len()).map(|i| (op, i)));
         if !self.write {
-            if let Some((_, i)) = image {
+            if let Some((_, mut i)) = image {
+                i.opaque = !i.alpha || opaque_inside(samples, &i);
                 self.images.push((index, i));
             }
             self.emit(line)?;
             self.emit(&region)?;
             return Ok(true);
         }
-        let lowered = match (image, self.plan.get(index).copied().flatten(), last.as_ref()) {
-            (Some((op, i)), Some((w, h)), Some((at, _))) => shrink(samples, &i, w, h).map(|s| (op.rewritten(&i, w, h), s, *at)),
+        let image = image.map(|(op, mut i)| {
+            i.opaque = !i.alpha || opaque_inside(samples, &i);
+            (op, i)
+        });
+        let written = match (image, self.plan.get(index).copied().flatten(), last.as_ref()) {
+            (Some((op, i)), Some(write), Some((at, _))) => rewrite(samples, &op, &i, write).map(|(o, c, b)| (o, c, b, *at)),
             _ => None,
         };
-        match lowered {
-            Some((operands, samples, at)) => {
+        match written {
+            Some((operands, counted, bytes, at)) => {
                 // The operands' line (and the line ends after it) written again.
                 let dropped = self.out.len().saturating_sub(at);
                 self.out.truncate(at);
                 self.len = self.len.saturating_sub(dropped as u64);
                 self.emit(operands.as_bytes())?;
-                self.emit(format!("\n%%BeginData: {}\nXI\n", samples.color + 3).as_bytes())?;
-                self.emit(&samples.bytes)?;
+                self.emit(format!("\n%%BeginData: {}\nXI\n", counted + 3).as_bytes())?;
+                self.emit(&bytes)?;
             }
             None => {
                 self.emit(line)?;
@@ -349,6 +414,51 @@ impl Pass {
         }
         Ok(true)
     }
+}
+
+/// The image `i` (its operands `op`, its `samples`) written as `write` says → its operands, the
+/// bytes its `%%BeginData:` count counts (all but an alpha channel), and its bytes.
+fn rewrite(samples: &[u8], op: &Operands, i: &Image, write: Write) -> Option<(String, usize, Vec<u8>)> {
+    let (w, h) = write.size();
+    match write {
+        Write::Samples(..) => {
+            let lowered = shrink(samples, i, w, h)?;
+            Some((op.rewritten(i, w, h, false), lowered.color, lowered.bytes))
+        }
+        Write::Jpeg(..) => {
+            let lowered;
+            let color = if (w, h) == (i.w, i.h) {
+                samples.get(..usize::try_from(i.w.checked_mul(i.h)?.checked_mul(i.channels)?).ok()?)?
+            } else {
+                lowered = shrink(samples, i, w, h)?;
+                lowered.bytes.get(..lowered.color)?
+            };
+            let file = jpeg(color, i.channels, w, h)?;
+            Some((op.rewritten(i, w, h, true), file.len(), file))
+        }
+    }
+}
+
+/// Is the alpha channel after the colour samples of `i` opaque inside its outermost pixels?
+fn opaque_inside(samples: &[u8], i: &Image) -> bool {
+    let (Ok(w), Ok(h), Ok(ch)) = (usize::try_from(i.w), usize::try_from(i.h), usize::try_from(i.channels)) else { return false };
+    let Some(alpha) = w.checked_mul(h).and_then(|n| n.checked_mul(ch)).and_then(|color| samples.get(color..color.checked_add(w * h)?)) else {
+        return false;
+    };
+    (1..h.saturating_sub(1)).all(|y| alpha.get(y * w + 1..(y + 1) * w - 1).is_some_and(|row| row.iter().all(|a| *a == 255)))
+}
+
+/// A JPEG file of `w` × `h` pixels of `channels` 8-bit samples (grey, RGB, or CMYK ink amounts).
+fn jpeg(samples: &[u8], channels: u64, w: u64, h: u64) -> Option<Vec<u8>> {
+    let kind = match channels {
+        1 => jpeg_encoder::ColorType::Luma,
+        3 => jpeg_encoder::ColorType::Rgb,
+        4 => jpeg_encoder::ColorType::Cmyk,
+        _ => return None,
+    };
+    let mut out = vec![];
+    jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY).encode(samples, u16::try_from(w).ok()?, u16::try_from(h).ok()?, kind).ok()?;
+    Some(out)
 }
 
 /// Samples lowered: the colour samples' length (the `%%BeginData:` count leaves out the alpha
@@ -396,13 +506,22 @@ impl Operands {
         if !(sx > 1e-9 && sy > 1e-9) {
             return None;
         }
-        let image = Image { w: *w as u64, h: *h as u64, channels, alpha: *alpha > 0.0, samples: have as u64, ppi: (72.0 / sx, 72.0 / sy) };
+        let image = Image {
+            w: *w as u64,
+            h: *h as u64,
+            channels,
+            alpha: *alpha > 0.0,
+            opaque: *alpha <= 0.0,
+            samples: have as u64,
+            ppi: (72.0 / sx, 72.0 / sy),
+        };
         (image.bytes(image.w, image.h) <= have as u64).then_some(image)
     }
 
     /// The operands of the image `i` written at `w` × `h`: the matrix scaled so each pixel covers
-    /// the block it stands for, the size and the bounds in the image's space.
-    fn rewritten(&self, i: &Image, w: u64, h: u64) -> String {
+    /// the block it stands for, the size and the bounds in the image's space; as a `jpeg` file, its
+    /// `binary` [`JPEG_FILE`] and no alpha channel (a JPEG file has none).
+    fn rewritten(&self, i: &Image, w: u64, h: u64, jpeg: bool) -> String {
         let (fx, fy) = (i.w as f64 / w as f64, i.h as f64 / h as f64);
         let [a, b, c, d, tx, ty] = self.matrix;
         let m = [a * fx, b * fx, c * fy, d * fy, tx, ty];
@@ -410,6 +529,13 @@ impl Operands {
         for (k, v) in [(0, 0.0), (1, 0.0), (2, w as f64), (3, h as f64), (4, w as f64), (5, h as f64)] {
             if let Some(slot) = nums.get_mut(k) {
                 *slot = v;
+            }
+        }
+        if jpeg {
+            for (k, v) in [(8, 0.0), (10, JPEG_FILE)] {
+                if let Some(slot) = nums.get_mut(k) {
+                    *slot = v;
+                }
             }
         }
         let num = |v: &f64| if v.fract() == 0.0 && v.abs() < 1e15 { format!("{}", *v as i64) } else { format!("{v}") };
@@ -600,22 +726,35 @@ mod tests {
     /// 10 × 5 pt at (20, 150) art space (its top left), with an alpha channel; the samples: a
     /// gradient across, alpha 255 left of the middle and 0 right of it, and a rectangle after it.
     fn data(w: u32, h: u32) -> Vec<u8> {
+        data_with(w, h, ("DeviceRGB", 3), true)
+    }
+
+    /// [`data`] in the colour space `space` of `channels` samples a pixel (the gradient in the
+    /// first, the second at 255 minus it, the others 0), with an alpha channel or not.
+    fn data_with(w: u32, h: u32, (space, channels): (&str, u32), alpha: bool) -> Vec<u8> {
         let (sx, sy) = (10.0 / f64::from(w), 5.0 / f64::from(h));
         let mut s = format!(
             "%!PS-Adobe-3.0\n%%Creator: test\n%AI5_FileFormat 14.0\n%AI3_Cropmarks: 0 0 300 200\n%%EndComments\n%%BeginSetup\n%%EndSetup\n\
-             %AI5_BeginLayer\n1 1 1 1 0 0 1 0 79 128 255 0 50 0 Lb\n(L) Ln\n0 A\n0 Xw\n%AI5_File:\n%AI5_BeginRaster\n() 1 XG\n/DeviceRGB XN\n\
-             [ {sx} 0 0 {sy} 20 150 ] {w} {h} 0 Xh\n[ {sx} 0 0 {sy} 20 150 ] 0 0 {w} {h} {w} {h} 8 3 1 0 1 0 4 4 0 0\n%%BeginData: {}\nXI\n",
-            w * h * 3 + 3
+             %AI5_BeginLayer\n1 1 1 1 0 0 1 0 79 128 255 0 50 0 Lb\n(L) Ln\n0 A\n0 Xw\n%AI5_File:\n%AI5_BeginRaster\n() 1 XG\n/{space} XN\n\
+             [ {sx} 0 0 {sy} 20 150 ] {w} {h} 0 Xh\n[ {sx} 0 0 {sy} 20 150 ] 0 0 {w} {h} {w} {h} 8 {channels} {} 0 1 0 4 4 0 0\n%%BeginData: {}\nXI\n",
+            u8::from(alpha),
+            w * h * channels + 3
         )
         .into_bytes();
         for _ in 0..h {
             for x in 0..w {
                 let v = (x * 255 / (w - 1).max(1)) as u8;
-                s.extend_from_slice(&[v, 255 - v, 0]);
+                s.extend((0..channels).map(|c| match c {
+                    0 => v,
+                    1 => 255 - v,
+                    _ => 0,
+                }));
             }
         }
-        for _ in 0..h {
-            s.extend((0..w).map(|x| if x < w / 2 { 255 } else { 0 }));
+        if alpha {
+            for _ in 0..h {
+                s.extend((0..w).map(|x| if x < w / 2 { 255 } else { 0 }));
+            }
         }
         s.extend_from_slice(b"%%EndData\nXH\n%AI5_EndRaster\nN\n0 g\n200 20 m\n200 60 L\n260 60 L\n260 20 L\n200 20 L\nf\nLB\n%AI5_EndLayer--\n%%PageTrailer\n%%EOF\n");
         s
@@ -662,6 +801,58 @@ mod tests {
     }
 
     #[test]
+    fn large_images_without_an_alpha_channel_are_kept_as_jpeg_files() {
+        for (space, channels) in [("DeviceRGB", 3), ("DeviceCMYK", 4)] {
+            let raw = data_with(64, 32, (space, channels), false);
+            let full = super::super::read(&raw).unwrap();
+            let full_xf = image_of(&raw).1;
+            // 6 to 8 KB of samples: in 5 KB the samples don't fit, a JPEG file of them does.
+            let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
+            assert!(out.len() <= 5_000, "{}", out.len());
+            let r = super::super::read(&out).unwrap();
+            let art = r.doc.layers[0].children().unwrap().clone();
+            assert_eq!(art.len(), full.doc.layers[0].children().unwrap().len(), "{space}: the rectangle after it");
+            let NodeKind::Image(im) = &art[0].kind else { panic!("{:?}", art[0].kind) };
+            let blob = r.doc.images.get(&im.key).unwrap();
+            assert_eq!((blob.mime.as_str(), im.width, im.height, im.xf), ("image/jpeg", 64, 32, full_xf), "{space}: all of it, in its place");
+            assert_eq!(blob.is_cmyk(), channels == 4, "{space}");
+            if channels == 4 {
+                // The ink amounts kept: cyan across, magenta the other way, no yellow or black.
+                let inks = blob.cmyk().unwrap();
+                let px = |x: usize| inks.data[x * 4..x * 4 + 4].to_vec();
+                let (left, right) = (px(0), px(63));
+                assert!(left[0] < 12 && left[1] > 243 && left[2] < 12 && left[3] < 12, "{left:?}");
+                assert!(right[0] > 243 && right[1] < 12, "{right:?}");
+            }
+            assert!(r.warnings.iter().any(|w| w.starts_with("DanCard:") && w.contains("JPEG")), "{:?}", r.warnings);
+        }
+    }
+
+    #[test]
+    fn an_alpha_channel_see_through_only_at_the_edge_doesnt_keep_an_image_from_a_jpeg_file() {
+        // A page exported with an alpha channel: opaque but for its last column.
+        let mut raw = data_with(64, 32, ("DeviceCMYK", 4), true);
+        let at = raw.windows(3).position(|w| w == b"XI\n").unwrap() + 3 + 64 * 32 * 4;
+        for (k, a) in raw[at..at + 64 * 32].iter_mut().enumerate() {
+            *a = if k % 64 == 63 { 128 } else { 255 };
+        }
+        let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
+        let r = super::super::read(&out).unwrap();
+        let NodeKind::Image(im) = &r.doc.layers[0].children().unwrap()[0].kind else { panic!() };
+        let blob = r.doc.images.get(&im.key).unwrap();
+        assert_eq!((blob.mime.as_str(), im.width, blob.is_cmyk()), ("image/jpeg", 64, true));
+        // See-through inside: samples, lowered.
+        for (k, a) in raw[at..at + 64 * 32].iter_mut().enumerate() {
+            *a = if k == 64 * 10 + 20 { 0 } else { 255 };
+        }
+        let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
+        let r = super::super::read(&out).unwrap();
+        let NodeKind::Image(im) = &r.doc.layers[0].children().unwrap()[0].kind else { panic!() };
+        assert_eq!(r.doc.images.get(&im.key).unwrap().mime, "image/png");
+        assert!(im.width < 64, "{}", im.width);
+    }
+
+    #[test]
     fn what_cant_be_lowered_is_kept_as_it_is() {
         // The section of a hidden object's copy, hex samples, and data too large however low.
         let raw = data(40, 20);
@@ -695,17 +886,21 @@ mod tests {
 
     #[test]
     fn the_plan_lowers_the_finest_images_first() {
-        let i = |ppi: f64, w: u64| Image { w, h: w, channels: 4, alpha: false, samples: w * w * 4, ppi: (ppi, ppi) };
+        let i = |ppi: f64, w: u64| Image { w, h: w, channels: 4, alpha: false, opaque: true, samples: w * w * 4, ppi: (ppi, ppi) };
         let images = [(0, i(1200.0, 1000)), (2, i(300.0, 1000))];
         // Room for both at 600 ppi or so: the first lowered, the second as it is.
         let budget = 4_000_000 + 1_000_000 + 4 * OVERHEAD;
-        let (ppi, plan) = plan(&images, 8_000_000, budget).unwrap();
+        let (ppi, plan) = plan(&images, 8_000_000, budget, None).unwrap();
         assert!((590.0..=610.0).contains(&ppi), "{ppi}");
         assert_eq!(plan.len(), 3);
-        let (w, h) = plan[0].unwrap();
+        let (w, h) = plan[0].unwrap().size();
         assert!((480..=520).contains(&w) && w == h, "{w}");
         assert_eq!((plan[1], plan[2]), (None, None));
-        assert!(super::plan(&images, 8_000_000, 1000).is_none());
+        assert!(matches!(plan[0], Some(Write::Samples(..))));
+        assert!(super::plan(&images, 8_000_000, 1000, None).is_none());
+        // As JPEG files taken to be 8 times smaller: both as they are, 1 MB in all.
+        let (_, jpeg) = super::plan(&images, 8_000_000, 1_100_000, Some(8)).unwrap();
+        assert_eq!((jpeg[0], jpeg[2]), (Some(Write::Jpeg(1000, 1000)), Some(Write::Jpeg(1000, 1000))));
     }
 
     #[test]

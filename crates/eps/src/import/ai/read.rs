@@ -578,13 +578,20 @@ impl<'a> Reader<'a> {
     fn comment(&mut self, c: &[u8]) -> Result<(), String> {
         let line = String::from_utf8_lossy(c);
         let line = line.trim_end();
-        // DanCard fork: data too large to hold, its images lowered as it decompressed.
-        if let Some(ppi) = line.strip_prefix(super::dancard_compact::LOWERED) {
+        // DanCard fork: data too large to hold, its images kept as JPEG files or lowered as it
+        // decompressed (`dancard_compact`: the resolution they came down to, 0 for none, and 1 when
+        // they are JPEG files).
+        if let Some(rest) = line.strip_prefix(super::dancard_compact::LOWERED) {
+            let mut it = rest.split_whitespace();
+            let ppi: f64 = it.next().and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite()).unwrap_or(0.0);
+            let what = match (it.next() == Some("1"), ppi > 0.0) {
+                (true, false) => "ảnh lớn trong file được giữ đủ độ phân giải, lưu dạng JPEG chất lượng cao".to_string(),
+                (true, true) => format!("ảnh lớn trong file được lưu dạng JPEG chất lượng cao, ảnh quá mịn giảm còn khoảng {ppi} ppi trên trang"),
+                (false, _) => format!("ảnh trong file được giảm còn khoảng {ppi} ppi trên trang"),
+            };
             self.warn(&format!(
-                "DanCard: file rất nặng (bản chỉnh sửa giải nén ra hơn {} MB) nên ảnh trong file được giảm còn khoảng {} ppi \
-                 trên trang để mở được cả file, group giữ nguyên.",
-                super::MAX_DATA >> 20,
-                ppi.trim()
+                "DanCard: file rất nặng (bản chỉnh sửa giải nén ra hơn {} MB) nên {what} để mở được cả file; group giữ nguyên.",
+                super::MAX_DATA >> 20
             ));
             return Ok(());
         }
@@ -1689,6 +1696,10 @@ impl<'a> Reader<'a> {
         let Some(m) = vals.iter().find_map(|v| if let V::Arr(a) = v { Some(Self::nums(a)) } else { None }) else { return Ok(()) };
         let n = Self::nums(&vals);
         let [_, _, _, _, w, h, bits, kind, alpha, _, binary, ..] = n.as_slice() else { return Ok(()) };
+        // DanCard fork: an image `dancard_compact` kept as a JPEG file.
+        if *binary == super::dancard_compact::JPEG_FILE {
+            return self.jpeg_image(&m, data);
+        }
         let (w, h) = (*w as u64, *h as u64);
         if w == 0 || h == 0 || w.saturating_mul(h) > MAX_SOURCE_PIXELS || ![1.0, 8.0].contains(bits) {
             self.warn("an image VectorCraft can't read was left out");
@@ -1795,6 +1806,26 @@ impl<'a> Reader<'a> {
         let key = blob.content_key();
         self.doc.images.entry(key.clone()).or_insert(blob);
         self.add_image(ImageObject { key, width: ow as u32, height: oh as u32, xf, link: None, placement: Default::default() }, false)
+    }
+
+    /// DanCard fork: an image `dancard_compact` kept as a JPEG file (`data`), placed by the matrix
+    /// `m` as samples of its size are.
+    fn jpeg_image(&mut self, m: &[f64], data: &[u8]) -> Result<(), String> {
+        let size = image::ImageReader::with_format(std::io::Cursor::new(data), image::ImageFormat::Jpeg).into_dimensions().ok();
+        let size = size.filter(|(w, h)| *w > 0 && *h > 0 && u64::from(*w) * u64::from(*h) <= MAX_SOURCE_PIXELS);
+        let (Some((w, h)), [a, b, c, d, tx, ty]) = (size, m) else {
+            self.warn("an image VectorCraft can't read was left out");
+            return Ok(());
+        };
+        let to_doc = self.space();
+        let xf = to_doc * Affine::new([*a, *b, *c, *d, *tx, *ty]) * FLIP;
+        if !xf.as_coeffs().iter().all(|v| v.is_finite()) || xf.determinant().abs() < 1e-12 {
+            return Ok(());
+        }
+        let blob = ImageBlob::new("image/jpeg", data.to_vec());
+        let key = blob.content_key();
+        self.doc.images.entry(key.clone()).or_insert(blob);
+        self.add_image(ImageObject { key, width: w, height: h, xf, link: None, placement: Default::default() }, false)
     }
 
     /// Add an image object with the state's transparency.
