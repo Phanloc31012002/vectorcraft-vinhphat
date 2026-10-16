@@ -767,7 +767,7 @@ mod tests {
     }
 
     fn image_of(data: &[u8]) -> (image::RgbaImage, kurbo::Affine, usize) {
-        let doc = super::super::read(data).unwrap().doc;
+        let doc = super::super::read(data, false).unwrap().doc;
         let art = doc.layers[0].children().unwrap().clone();
         let NodeKind::Image(im) = &art[0].kind else { panic!("{:?}", art[0].kind) };
         let png = image::load_from_memory(&doc.images.get(&im.key).unwrap().bytes).unwrap().to_rgba8();
@@ -786,7 +786,7 @@ mod tests {
         assert!(small.len() <= 4_000, "{}", small.len());
         let (img, xf, n) = image_of(&small);
         assert_eq!(n, 2, "the rectangle after the image");
-        let warnings = super::super::read(&small).unwrap().warnings;
+        let warnings = super::super::read(&small, false).unwrap().warnings;
         assert!(warnings.iter().any(|w| w.starts_with("DanCard:") && w.contains("ppi")), "the reader says so: {warnings:?}");
         let (w, h) = img.dimensions();
         assert!(w < 64 && h < 32 && w >= 16 && (f64::from(w) / f64::from(h) - 2.0).abs() < 0.1, "{w} × {h}");
@@ -804,12 +804,12 @@ mod tests {
     fn large_images_without_an_alpha_channel_are_kept_as_jpeg_files() {
         for (space, channels) in [("DeviceRGB", 3), ("DeviceCMYK", 4)] {
             let raw = data_with(64, 32, (space, channels), false);
-            let full = super::super::read(&raw).unwrap();
+            let full = super::super::read(&raw, false).unwrap();
             let full_xf = image_of(&raw).1;
             // 6 to 8 KB of samples: in 5 KB the samples don't fit, a JPEG file of them does.
             let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
             assert!(out.len() <= 5_000, "{}", out.len());
-            let r = super::super::read(&out).unwrap();
+            let r = super::super::read(&out, false).unwrap();
             let art = r.doc.layers[0].children().unwrap().clone();
             assert_eq!(art.len(), full.doc.layers[0].children().unwrap().len(), "{space}: the rectangle after it");
             let NodeKind::Image(im) = &art[0].kind else { panic!("{:?}", art[0].kind) };
@@ -837,7 +837,7 @@ mod tests {
             *a = if k % 64 == 63 { 128 } else { 255 };
         }
         let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
-        let r = super::super::read(&out).unwrap();
+        let r = super::super::read(&out, false).unwrap();
         let NodeKind::Image(im) = &r.doc.layers[0].children().unwrap()[0].kind else { panic!() };
         let blob = r.doc.images.get(&im.key).unwrap();
         assert_eq!((blob.mime.as_str(), im.width, blob.is_cmyk()), ("image/jpeg", 64, true));
@@ -846,7 +846,7 @@ mod tests {
             *a = if k == 64 * 10 + 20 { 0 } else { 255 };
         }
         let out = decompress(Codec::Zlib, &zlib(&raw), 5_000).unwrap();
-        let r = super::super::read(&out).unwrap();
+        let r = super::super::read(&out, false).unwrap();
         let NodeKind::Image(im) = &r.doc.layers[0].children().unwrap()[0].kind else { panic!() };
         assert_eq!(r.doc.images.get(&im.key).unwrap().mime, "image/png");
         assert!(im.width < 64, "{}", im.width);
@@ -878,7 +878,7 @@ mod tests {
             for max in [600, 3_000, 100_000] {
                 if let Ok(out) = decompress(Codec::Zlib, &zlib(&c), max) {
                     assert!(out.len() as u64 <= max);
-                    let _ = super::super::read(&out);
+                    let _ = super::super::read(&out, false);
                 }
             }
         }
