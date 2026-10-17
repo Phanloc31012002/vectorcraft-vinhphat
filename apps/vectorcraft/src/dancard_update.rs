@@ -697,7 +697,7 @@ pub fn start_checker(ctx: &egui::Context) {
         return;
     };
     // A build downloaded at an earlier run and not applied yet (another window ran then).
-    let ready = |root: &Path| ready_build(&root.join(UPDATE)).filter(|b| *b > current);
+    let ready = move |root: &Path| ready_build(&root.join(UPDATE)).filter(|b| *b > current);
     status(ready(&root).map_or(UpdateStatus::Idle, UpdateStatus::Ready));
     let ctx = ctx.clone();
     let spawned = std::thread::Builder::new().name("dancard-update".into()).spawn(move || {

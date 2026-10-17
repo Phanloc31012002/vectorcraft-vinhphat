@@ -108,9 +108,12 @@ fn request_update(r: UpdateRequest) {
     *REQUEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r);
 }
 
+/// Nút của dòng báo cập nhật: nhãn, việc.
+type UpdateButton = Option<(&'static str, UpdateRequest)>;
+
 /// Dòng báo cập nhật cho `status` (bản đang chạy là `build`): chữ, chữ đậm hay không, nút (nhãn,
 /// việc). `None`: không hiện dòng nào.
-fn update_line(status: &UpdateStatus, build: Option<u64>) -> Option<(String, bool, Option<(&'static str, UpdateRequest)>)> {
+fn update_line(status: &UpdateStatus, build: Option<u64>) -> Option<(String, bool, UpdateButton)> {
     let check = Some(("Kiểm tra cập nhật", UpdateRequest::Check));
     Some(match status {
         UpdateStatus::None => return None,
