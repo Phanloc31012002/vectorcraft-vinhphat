@@ -249,7 +249,8 @@ fn unsafe_data(stream: &Stream<'_>, inside: bool) -> bool {
     let content = inside && maybe_content(dict);
     match decode(&stream.raw_data(), dict, content) {
         Err(TooBig) => true,
-        Ok(Some(data)) if content && data.windows(2).any(|w| w == b"ID") => {
+        // (DanCard fork: a fast search, the data can be large.)
+        Ok(Some(data)) if content && memchr::memmem::find(&data, b"ID").is_some() => {
             let mut ops = TypedIter::new(&data);
             while let Some(op) = ops.next() {
                 if let TypedInstruction::InlineImage(image) = op
@@ -270,7 +271,8 @@ fn unsafe_data(stream: &Stream<'_>, inside: bool) -> bool {
 /// yet. Encrypted object streams are looked at once the file is open (their data is ciphered
 /// here).
 pub(crate) fn unsafe_file_streams(pdf: &[u8]) -> bool {
-    let find = |from: usize, what: &[u8]| pdf.get(from..).and_then(|rest| rest.windows(what.len()).position(|w| w == what)).map(|at| from + at);
+    // DanCard fork: a fast search (a print file can be hundreds of MB).
+    let find = |from: usize, what: &[u8]| pdf.get(from..).and_then(|rest| memchr::memmem::find(rest, what)).map(|at| from + at);
     let mut from = 0;
     while let Some(at) = find(from, b"stream") {
         from = at + 6;

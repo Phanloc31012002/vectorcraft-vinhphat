@@ -29,6 +29,8 @@ ruzstd = { workspace = true }
 jpeg-encoder = { workspace = true }
 # Live effects' params, as the art styles that name them give them.
 serde_json = { workspace = true }
+# DanCard fork: fast byte searches in editing copies hundreds of MB long.
+memchr = "2"
 
 [dev-dependencies]
 vectorcraft-testkit = { workspace = true }

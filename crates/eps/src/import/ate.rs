@@ -307,7 +307,8 @@ impl Texts {
     /// The text document in the editing copy `data`, if it has one that can be read.
     pub(super) fn read(data: &[u8]) -> Option<Texts> {
         fn find(h: &[u8], n: &[u8], from: usize) -> Option<usize> {
-            h.get(from..)?.windows(n.len()).position(|w| w == n).map(|p| p + from)
+            // DanCard fork: a fast search (the text document is at the end of the editing copy).
+            memchr::memmem::find(h.get(from..)?, n).map(|p| p + from)
         }
         let start = find(data, b"%AI11_BeginTextDocument", 0)?;
         let from = find(data, b"/ASCII85Decode", start)? + b"/ASCII85Decode".len();

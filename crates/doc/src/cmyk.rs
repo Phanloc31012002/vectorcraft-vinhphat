@@ -66,11 +66,22 @@ fn tiff(bytes: &[u8]) -> Option<(tiff::ColorType, tiff::decoder::Decoder<Cursor<
 impl ImageBlob {
     /// A CMYK TIFF of ink amounts `inks` (Deflate-compressed); `None` when it can't be written.
     pub fn cmyk_tiff(inks: &Inks) -> Option<Self> {
-        use tiff::encoder::{Compression, TiffEncoder, colortype::CMYK8, compression::DeflateLevel};
+        Self::cmyk_tiff_at(inks, tiff::encoder::compression::DeflateLevel::Balanced)
+    }
+
+    /// DanCard fork: [`Self::cmyk_tiff`] compressed for speed: for the images of a file being
+    /// opened, many and large, where waiting matters more than the third more memory they take
+    /// (about 3 times quicker to write).
+    pub fn cmyk_tiff_fast(inks: &Inks) -> Option<Self> {
+        Self::cmyk_tiff_at(inks, tiff::encoder::compression::DeflateLevel::Fast)
+    }
+
+    fn cmyk_tiff_at(inks: &Inks, level: tiff::encoder::compression::DeflateLevel) -> Option<Self> {
+        use tiff::encoder::{Compression, TiffEncoder, colortype::CMYK8};
         let mut out = Cursor::new(Vec::new());
         TiffEncoder::new(&mut out)
             .ok()?
-            .with_compression(Compression::Deflate(DeflateLevel::Balanced))
+            .with_compression(Compression::Deflate(level))
             .write_image::<CMYK8>(inks.width, inks.height, &inks.data)
             .ok()?;
         Some(Self::new("image/tiff", out.into_inner()))

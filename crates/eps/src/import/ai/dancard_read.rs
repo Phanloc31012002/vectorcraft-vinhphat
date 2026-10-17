@@ -85,6 +85,26 @@ impl Reader<'_> {
             sums.iter_mut().for_each(|s| *s = [0; 6]);
             for y in oy * step..((oy + 1) * step).min(h) {
                 let line = samples.get(y * row..(y + 1) * row).unwrap_or_default();
+                // 8-bit samples (what print files have): summed a block at a time, quickly.
+                if !one_bit {
+                    let row_alpha = alpha.and_then(|o| o.get(y * w..(y + 1) * w));
+                    for (bx, (block, sum)) in line.chunks(step * channels).zip(sums.iter_mut()).enumerate() {
+                        let block_alpha = row_alpha.and_then(|a| a.get(bx * step..)).unwrap_or_default();
+                        for (i, px) in block.chunks_exact(channels).enumerate() {
+                            let [p0, p1, p2, p3] = match *px {
+                                [k] => [k, k, k, 0],
+                                [r, g, b] => [r, g, b, 0],
+                                [c, m, y, k] => [c, m, y, k],
+                                _ => [0; 4],
+                            };
+                            let a = if row_alpha.is_some() { block_alpha.get(i).copied().unwrap_or(255) } else { 255 };
+                            for (t, v) in sum.iter_mut().zip([p0, p1, p2, p3, a, 1]) {
+                                *t += u32::from(v);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 for x in 0..w {
                     let s = |c: usize| {
                         let i = x * channels + c;
@@ -129,7 +149,7 @@ impl Reader<'_> {
         let m = [a * sx, b * sx, c * sy, d * sy, *tx, *ty];
         let size = (ow as u32, oh as u32);
         let blob = if inks {
-            Inks::new(size.0, size.1, out).and_then(|i| ImageBlob::cmyk_tiff(&i))
+            Inks::new(size.0, size.1, out).and_then(|i| ImageBlob::cmyk_tiff_fast(&i))
         } else {
             image::RgbaImage::from_raw(size.0, size.1, out).and_then(|img| {
                 let mut png = vec![];

@@ -151,6 +151,13 @@ pub(super) fn import(bytes: &[u8], o: &LoadOptions, editor_document: bool) -> Re
     vectorcraft_pdf::import_with_report(bytes, &o.import_options(bytes, editor_document)?).map_err(err)
 }
 
+/// DanCard fork: [`import`] with the pages' images as boxes (`ImportOptions::dancard_image_boxes`):
+/// a page read only to compare the editor's copy of its art with, and for its type.
+pub(super) fn import_with_image_boxes(bytes: &[u8], o: &LoadOptions, editor_document: bool) -> Result<vectorcraft_pdf::ImportReport> {
+    let opts = ImportOptions { dancard_image_boxes: true, ..o.import_options(bytes, editor_document)? };
+    vectorcraft_pdf::import_with_report(bytes, &opts).map_err(err)
+}
+
 /// Page `page` (0-based) of a PDF as a document of one artboard (its `o.crop` box) and one
 /// layer of what it shows (text as outlines: it looks as printed), and the import notes.
 pub fn page_document(bytes: &[u8], page: usize, o: &LoadOptions) -> Result<(Document, Vec<String>)> {

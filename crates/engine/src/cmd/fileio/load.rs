@@ -13,6 +13,10 @@ use super::{Format, SAVE_FORMATS, absolute_path, file_stamp, format, format_for_
 use crate::cmd::links::Resolved;
 use crate::{EngineError, Prefs};
 
+// DanCard fork: heavy `.ai` and PDF files open faster.
+#[path = "dancard_open.rs"]
+mod dancard_open;
+
 /// A file read into a document, with its format and non-fatal import notes.
 pub struct Loaded {
     pub doc: Document,
@@ -194,6 +198,8 @@ fn from_editing_data_alone(bytes: &[u8], opts: &LoadOptions) -> Option<Result<(D
 
 /// [`load`] with `document.open` options (the PDF pages, box and password; the DXF options).
 pub fn load_with(name: &str, bytes: &[u8], opts: &LoadOptions) -> Result<Loaded> {
+    // DanCard fork: a PDF's safety checks are made once however many times it is opened here.
+    let _checks = vectorcraft_pdf::ChecksOnce::new(bytes);
     let format = detect(name, bytes).ok_or_else(|| match super::unsupported(&super::extension(name)) {
         Some(u) => err(format!("can't open `{}`: {}", file_name(name), u.hint)),
         None => err(format!("can't open `{name}`: not a format VectorCraft reads (see document.formats)")),
@@ -235,18 +241,24 @@ pub fn load_with(name: &str, bytes: &[u8], opts: &LoadOptions) -> Result<Loaded>
                 .then(|| vectorcraft_pdf::editing_with(bytes, opts.password.as_deref()))
                 .flatten()
                 .map(|e| (e.intact, move || Some(e.data)));
-            restore_or_import(editing, || match super::pdfimport::import(bytes, opts, format.id != "pdf") {
-                Ok(r) => {
-                    // Pages of text alone: the editing copy alone where it reads, as for a file
-                    // saved without its PDF part (#1387: else the page, which is the art).
-                    let alone = r.only_text.then(|| from_editing_data_alone(bytes, opts)).flatten().and_then(|read| read.ok());
-                    Ok(alone.unwrap_or_else(|| through_editing_data(bytes, opts, r.document, r.warnings, r.user_unit)))
+            restore_or_import(editing, || {
+                // DanCard fork: the editing copy trusted, read while the page is (`dancard_open`).
+                if let Some(read) = dancard_open::read_trusted(bytes, opts, format.id != "pdf") {
+                    return read;
                 }
-                // Saved without its PDF part: the editing copy is all the file has.
-                Err(e) if e.to_string() == vectorcraft_pdf::PdfError::PlaceholderOnly.to_string() => {
-                    from_editing_data_alone(bytes, opts).unwrap_or(Err(e))
+                match super::pdfimport::import(bytes, opts, format.id != "pdf") {
+                    Ok(r) => {
+                        // Pages of text alone: the editing copy alone where it reads, as for a file
+                        // saved without its PDF part (#1387: else the page, which is the art).
+                        let alone = r.only_text.then(|| from_editing_data_alone(bytes, opts)).flatten().and_then(|read| read.ok());
+                        Ok(alone.unwrap_or_else(|| through_editing_data(bytes, opts, r.document, r.warnings, r.user_unit)))
+                    }
+                    // Saved without its PDF part: the editing copy is all the file has.
+                    Err(e) if e.to_string() == vectorcraft_pdf::PdfError::PlaceholderOnly.to_string() => {
+                        from_editing_data_alone(bytes, opts).unwrap_or(Err(e))
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
             })?
         }
         "dxf" => {

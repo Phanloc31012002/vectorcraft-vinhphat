@@ -68,7 +68,7 @@ use graphics::{GState, Out};
 use interp::{Fault, Interp};
 use obj::PsError;
 
-pub use native::{ai_alone, ai_alone_trusting, is_loss, layered_ai};
+pub use native::{EditingRead, ai_alone, ai_alone_trusting, is_loss, layered_ai, layered_from, read_editing};
 pub use text::family_style;
 
 /// The page of a PostScript file without a bounding box (US Letter).

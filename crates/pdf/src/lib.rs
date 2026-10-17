@@ -43,6 +43,7 @@
 
 // DanCard fork: is the editing data older than the page?
 mod dancard;
+mod dancard_open;
 mod editing;
 mod encrypt;
 mod export;
@@ -72,6 +73,7 @@ mod streams;
 mod syntax;
 
 pub use dancard::page_newer_than_editing_data;
+pub use dancard_open::{ChecksOnce, box_image, boxed, clear_box_areas, has_image_boxes};
 pub use editing::{EDITING_FILE, Editing, LEGACY_EDITING_FILE, editing, editing_with};
 pub use encrypt::Encryption;
 pub use export::{export, export_with_report, page_areas};
@@ -132,6 +134,10 @@ pub struct ImportOptions {
     /// The file is an editor's own document (`.ai`): RGB in its `ICCBased` spaces keeps its numbers
     /// (see `Colors::uncalibrated_rgb`). Off for PDFs, whose profiles stand.
     pub uncalibrated_rgb: bool,
+    /// DanCard fork: the page is read only to be compared with the editor's copy of its art it
+    /// carries, and for its type: its images are boxes ([`box_image`]), neither decoded nor stored
+    /// again, and their own transparency isn't read.
+    pub dancard_image_boxes: bool,
 }
 
 impl Default for ImportOptions {
@@ -145,6 +151,7 @@ impl Default for ImportOptions {
             text_as: TextAs::default(),
             layers: true,
             uncalibrated_rgb: false,
+            dancard_image_boxes: false,
         }
     }
 }

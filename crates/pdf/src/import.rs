@@ -30,6 +30,8 @@ use crate::{CropTo, ImportOptions, ImportReport, PdfError, TextAs};
 
 /// Mixed into an image's cache key when it is read white inside an alpha soft mask.
 const WHITE_KEY: u128 = 0x7717_e000_a1fa;
+/// DanCard fork: the cache key of the box every image becomes (`ImportOptions::dancard_image_boxes`).
+const DANCARD_BOX_KEY: u128 = 0x000d_c0b0_c5e5;
 /// The name of the paths text imports as.
 const TEXT_OUTLINES: &str = "<Text Outlines>";
 /// A page whose overprint (ISO 32000-1 §8.6.7) is left out rather than given to the wrong objects.
@@ -230,6 +232,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     b.taken = taken;
     b.warnings = notes;
     b.colors.uncalibrated_rgb = opts.uncalibrated_rgb && picked.iter().filter_map(|&n| pages.get(n)).any(crate::pages::has_private_data);
+    b.image_boxes = opts.dancard_image_boxes;
     let cache = InterpreterCache::new();
     let mut x = 0.0;
     // Where the next page's art may begin (a `.ai` page's art reaches past its artboard).
@@ -863,6 +866,8 @@ struct Builder<'p> {
     /// mask's luminance is their alpha, as whitened vector art's is (cairo, and so Inkscape,
     /// rasterizes masks into such images).
     white_images: bool,
+    /// DanCard fork: images as boxes (`ImportOptions::dancard_image_boxes`).
+    image_boxes: bool,
     /// The last filled path: its node and its outline (a stroke of the same outline joins it).
     last_fill: Option<(NodeId, BezPath)>,
     /// What each line of type made tells beyond its text object ([`crate::import_lines`]).
@@ -1006,6 +1011,7 @@ impl<'p> Builder<'p> {
             pending: false,
             nested: 0,
             white_images: false,
+            image_boxes: false,
             last_fill: None,
             lines: HashMap::new(),
         }
@@ -1975,6 +1981,20 @@ impl<'a> Device<'a> for Builder<'_> {
         self.flush_glyphs();
         self.flush_text();
         self.pending = false;
+        // DanCard fork: the image as a box of its frame (`ImportOptions::dancard_image_boxes`): grey,
+        // see-through for one with its own transparency (a raster effect's, a cut-out photo's: the
+        // comparison passes over it), white in an alpha mask (which then hides nothing).
+        if self.image_boxes {
+            use crate::dancard_open::Boxed;
+            let ((w, h), kind) = match &image {
+                Image::Raster(r) if crate::import_image::has_mask(r.stream()) => ((r.width(), r.height()), Boxed::Clear),
+                Image::Raster(r) => ((r.width(), r.height()), Boxed::Grey),
+                Image::Stencil(s) => ((s.width(), s.height()), Boxed::Grey),
+            };
+            let kind = if self.white_images { Boxed::White } else { kind };
+            let xf = transform * Affine::scale_non_uniform(f64::from(w), f64::from(h));
+            return self.add_image(DANCARD_BOX_KEY ^ kind as u128, || Some((kind.image().clone(), 1, 1)), xf);
+        }
         match image {
             Image::Raster(r) => {
                 let white = self.white_images;

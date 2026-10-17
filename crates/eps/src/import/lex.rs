@@ -249,10 +249,8 @@ impl<'a> Lexer<'a> {
 
 /// Where `needle` first starts in `hay`.
 pub(crate) fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    hay.windows(needle.len()).position(|w| w == needle)
+    // DanCard fork: a fast search (an editing copy can be hundreds of MB, searched several times).
+    memchr::memmem::find(hay, needle)
 }
 
 /// Hexadecimal digits (whitespace ignored, an odd last digit padded with 0); `None` on others.

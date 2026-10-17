@@ -1,7 +1,8 @@
 //! The pages of a PDF to import: opening with a password, the pages picked, the box each page
 //! is cropped to ([`CropTo`]) and [`info`].
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use craft_pdf::syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier, Stream, dict_or_stream};
 use craft_pdf::syntax::page::Page;
@@ -130,14 +131,17 @@ const UNREADABLE_NOTE: &str = "an array in it is damaged and can't be read";
 /// object is looked at, and every array, dictionary and stream written inside one, wherever it
 /// is used from: the interpreter builds functions and color spaces from resources, shadings,
 /// images, patterns, masks and graphics states alike.
-fn hostile(pdf: &Pdf) -> Option<&'static str> {
+fn hostile(pdf: &Pdf, seen: &mut HashSet<(usize, usize)>) -> Option<&'static str> {
     let xref = pdf.xref();
     let mut known = HashMap::new();
     // The objects of the file, then what each holds directly (64 deep at most: the reader's cap).
     let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
     while let Some(o) = pending.pop() {
-        // A stream's own checks come first: a calculator function is decoded below.
-        if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s)) {
+        // A stream's own checks come first: a calculator function is decoded below. DanCard fork:
+        // a stream of the file checked in the first round isn't checked again in the second (the
+        // same bytes, the same dictionary before them: the same answer); the other objects of a
+        // repaired table are.
+        if matches!(&o, Object::Stream(s) if !checked_before(s, seen) && crate::streams::unsafe_stream(s)) {
             return Some(STREAM_NOTE);
         }
         if procedures_too_deep(&o) || built_on(MaybeRef::NotRef(o.clone()), xref, &mut known, MAX_LINKS).is_none() {
@@ -152,6 +156,15 @@ fn hostile(pdf: &Pdf) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// DanCard fork: was `stream` (its bytes in the file, at the place they are) checked already in an
+/// earlier round of [`hostile`]? Marks it checked. A decrypted stream (a copy) is checked each time.
+fn checked_before(stream: &Stream<'_>, seen: &mut HashSet<(usize, usize)>) -> bool {
+    match stream.raw_data() {
+        Cow::Borrowed(data) => !seen.insert((data.as_ptr() as usize, data.len())),
+        Cow::Owned(_) => false,
+    }
 }
 
 /// Read a PDF, decrypting it with `password` (none: the empty user password). The permissions
@@ -178,7 +191,8 @@ pub(crate) fn open_with_options(bytes: &[u8], password: Option<&str>, options: &
     if is_postscript(bytes) {
         return Err(PdfError::PostScript);
     }
-    if crate::streams::unsafe_file_streams(bytes) {
+    // DanCard fork: checked once while the file is read (`dancard_open::ChecksOnce`).
+    if crate::dancard_open::streams_once(bytes, || crate::streams::unsafe_file_streams(bytes)) {
         return Err(PdfError::Parse(STREAM_NOTE.into()));
     }
     let password = password.unwrap_or_default();
@@ -201,9 +215,14 @@ pub(crate) fn open_with_options(bytes: &[u8], password: Option<&str>, options: &
         })
         // Twice: looking at every object makes the reader repair a damaged table of objects (once
         // only), and the objects are other ones after that.
-        .and_then(|pdf| match (0..2).find_map(|_| hostile(&pdf)) {
-            Some(why) => Err(PdfError::Parse(why.into())),
-            None => Ok(pdf),
+        .and_then(|pdf| {
+            match crate::dancard_open::hostile_once(bytes, password, || {
+                let mut seen = HashSet::new();
+                (0..2).find_map(|_| hostile(&pdf, &mut seen))
+            }) {
+                Some(why) => Err(PdfError::Parse(why.into())),
+                None => Ok(pdf),
+            }
         })
 }
 

@@ -33,6 +33,8 @@ roxmltree = "0.21"
 aes = "0.8"
 md-5 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+# DanCard fork: a fast search for the file's streams (`streams::unsafe_file_streams`).
+memchr = "2"
 
 [dev-dependencies]
 vectorcraft-testkit = { workspace = true }

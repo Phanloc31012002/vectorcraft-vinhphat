@@ -37,7 +37,10 @@ mod ps;
 mod scene;
 mod tiff;
 
-pub use import::{Imported, ai_alone, ai_alone_trusting, family_style, import, import_trusting, import_with, is_loss, layered_ai};
+pub use import::{
+    EditingRead, Imported, ai_alone, ai_alone_trusting, family_style, import, import_trusting, import_with, is_loss, layered_ai, layered_from,
+    read_editing,
+};
 pub use legacy_ai::{HiddenObjects, LegacyAiOptions, LegacyAiOutput, export_legacy_ai};
 pub use print::{PrintJob, PrintPage, print};
 

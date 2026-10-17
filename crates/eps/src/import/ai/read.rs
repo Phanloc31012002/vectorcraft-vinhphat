@@ -1883,9 +1883,10 @@ impl<'a> Reader<'a> {
         }
         // CMYK samples keep their ink amounts as a CMYK TIFF, as the PDF importer keeps a CMYK
         // image's, and an alpha channel that hides part of the image becomes its opacity mask.
+        // (DanCard fork: written for speed, `cmyk_tiff_fast`.)
         if channels == 4
             && *bits == 8.0
-            && let Some(blob) = Inks::new(w as u32, h as u32, samples.to_vec()).and_then(|i| ImageBlob::cmyk_tiff(&i))
+            && let Some(blob) = Inks::new(w as u32, h as u32, samples.to_vec()).and_then(|i| ImageBlob::cmyk_tiff_fast(&i))
         {
             return self.add_raster(blob, opacity, &m, (w as u32, h as u32));
         }

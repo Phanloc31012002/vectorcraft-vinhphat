@@ -712,6 +712,11 @@ struct PageView {
     page_type: Vec<Rect>,
     layers: vectorcraft_render::Renderer,
     scale: f64,
+    /// DanCard fork: the page's images are boxes (`vectorcraft_pdf::has_image_boxes`): the layers'
+    /// are drawn so too, and where the page's see-through boxes are (images with their own
+    /// transparency, in its pixels: `x0, y0, x1, y1`) the two are taken as the same.
+    boxes: bool,
+    passed_over: Vec<[usize; 4]>,
 }
 
 impl PageView {
@@ -723,15 +728,38 @@ impl PageView {
         let page = vectorcraft_render::Renderer::new().render_region(frame.page, ra, scale, false);
         let mut page_type = vec![];
         type_areas(&frame.page.layers, ra, scale, &mut page_type);
-        Self { page, page_type, layers: vectorcraft_render::Renderer::new(), scale }
+        let boxes = vectorcraft_pdf::has_image_boxes(frame.page);
+        let passed_over =
+            if boxes { pixel_areas(&vectorcraft_pdf::clear_box_areas(frame.page), ra, scale, (page.width, page.height)) } else { vec![] };
+        Self { page, page_type, layers: vectorcraft_render::Renderer::new(), scale, boxes, passed_over }
+    }
+
+    /// DanCard fork: `y` (the layers drawn) with the page's pixels where the comparison passes over
+    /// (`passed_over`).
+    fn pass_over(&self, y: &mut vectorcraft_render::Rendered) {
+        if (y.width, y.height) != (self.page.width, self.page.height) {
+            return;
+        }
+        let w = self.page.width as usize;
+        for &[x0, y0, x1, y1] in &self.passed_over {
+            for row in y0..y1 {
+                let span = (row * w + x0) * 4..(row * w + x1) * 4;
+                if let (Some(from), Some(to)) = (self.page.pixels.get(span.clone()), y.pixels.get_mut(span)) {
+                    to.copy_from_slice(from);
+                }
+            }
+        }
     }
 
     /// How `b` on `rb` (a rectangle the page's size) draws differently from the page ([`compared`]).
     fn difference(&mut self, b: &Document, rb: Rect) -> Difference {
+        let boxed = self.boxes.then(|| vectorcraft_pdf::boxed(b));
+        let b = boxed.as_ref().unwrap_or(b);
         // The page doesn't print what isn't printed.
         let printed = as_printed(b);
         let b = printed.as_ref().unwrap_or(b);
-        let y = self.layers.render_region(b, rb, self.scale, false);
+        let mut y = self.layers.render_region(b, rb, self.scale, false);
+        self.pass_over(&mut y);
         let mut areas = self.page_type.clone();
         type_areas(&b.layers, rb, self.scale, &mut areas);
         compared(&self.page, &y, &areas)
@@ -741,20 +769,41 @@ impl PageView {
     /// ([`differ_in_colour`]), type included: what taking an object out of the layers changes
     /// there, when it is covered by one of about the same lightness (#1102).
     fn colour_difference(&mut self, b: &Document, rb: Rect) -> f64 {
+        let boxed = self.boxes.then(|| vectorcraft_pdf::boxed(b));
+        let b = boxed.as_ref().unwrap_or(b);
         let printed = as_printed(b);
         let b = printed.as_ref().unwrap_or(b);
-        let y = self.layers.render_region(b, rb, self.scale, false);
+        let mut y = self.layers.render_region(b, rb, self.scale, false);
         if (y.width, y.height) != (self.page.width, self.page.height) {
             return 1.0;
         }
+        self.pass_over(&mut y);
         let differing = self.page.pixels.as_chunks::<4>().0.iter().zip(y.pixels.as_chunks::<4>().0).filter(|(p, q)| differ_in_colour(p, q)).count();
         differing as f64 / (f64::from(y.width) * f64::from(y.height)).max(1.0)
     }
 }
 
+/// DanCard fork: the pixels of `areas` (document rectangles) in `region` drawn at `scale` on
+/// `w` × `h` pixels, a pixel larger all round (for what draws their edges): `x0, y0, x1, y1`.
+fn pixel_areas(areas: &[Rect], region: Rect, scale: f64, (w, h): (u32, u32)) -> Vec<[usize; 4]> {
+    let px = |v: f64, most: u32| if v.is_finite() { v.clamp(0.0, f64::from(most)) as usize } else { 0 };
+    areas
+        .iter()
+        .map(|r| {
+            let x0 = px(((r.x0 - region.x0) * scale).floor() - 1.0, w);
+            let y0 = px(((r.y0 - region.y0) * scale).floor() - 1.0, h);
+            let x1 = px(((r.x1 - region.x0) * scale).ceil() + 1.0, w);
+            let y1 = px(((r.y1 - region.y0) * scale).ceil() + 1.0, h);
+            [x0, y0, x1.max(x0), y1.max(y0)]
+        })
+        .collect()
+}
+
 /// How `a` on `ra` and `b` on `rb` (rectangles of the same size) draw differently ([`compared`]),
 /// for a region other than the page's ([`PageView`] draws that one once).
 fn difference(a: &Document, ra: Rect, b: &Document, rb: Rect) -> Difference {
+    let boxed = vectorcraft_pdf::has_image_boxes(a).then(|| vectorcraft_pdf::boxed(b));
+    let b = boxed.as_ref().unwrap_or(b);
     let printed = as_printed(b);
     let b = printed.as_ref().unwrap_or(b);
     let scale = compare_scale(ra);
@@ -875,9 +924,28 @@ struct Frame<'a> {
 fn build(data: &[u8], visible: Option<&Document>, page: Page, outlined: bool, trust: bool, unit: f64) -> Result<(Document, Vec<String>), String> {
     // An EPS (its page is its art) draws a Large Canvas page at full size; a `.ai` keeps its art
     // space, as its PDF part may (#2031).
-    // DanCard fork: trusting the editing data, what it can't draw yet (opacity masks) is drawn past.
-    let read = if trust { ai::read_trusting } else { ai::read };
-    let Structure { mut doc, to_doc, bbox, artboard, template, hidden_unread, slot_names, warnings } = read(data, matches!(page, Page::Art))?;
+    build_from(read_structure(data, matches!(page, Page::Art), trust), data, visible, page, outlined, trust, unit)
+}
+
+/// DanCard fork: the editing copy `data` read (`large_canvas` as `ai::read` takes it); trusting the
+/// editing data (`trust`), what it can't draw yet (opacity masks) is drawn past.
+fn read_structure(data: &[u8], large_canvas: bool, trust: bool) -> Result<Structure, String> {
+    if trust { ai::read_trusting(data, large_canvas) } else { ai::read(data, large_canvas) }
+}
+
+/// [`build`] of the editing copy `data` read as `read` (DanCard fork: it may be read ahead, while
+/// the page is, see [`read_editing`]).
+#[allow(clippy::too_many_arguments)]
+fn build_from(
+    read: Result<Structure, String>,
+    data: &[u8],
+    visible: Option<&Document>,
+    page: Page,
+    outlined: bool,
+    trust: bool,
+    unit: f64,
+) -> Result<(Document, Vec<String>), String> {
+    let Structure { mut doc, to_doc, bbox, artboard, template, hidden_unread, slot_names, warnings } = read?;
     // Editing data in the units of the page's user space ([`in_units`]) is compared with the page
     // scaled down to those units, and the document read from it is scaled up by `unit`.
     let board = artboard.map(|a| to_doc.transform_rect_bbox(a));
@@ -1195,11 +1263,41 @@ pub(super) fn layered(ps: &[u8], visible: Imported, trust: bool) -> Imported {
 /// units comes in `unit` times as large, and so does the artboard layout `place_pages` takes from
 /// it.
 pub fn layered_ai(private: &[u8], visible: Document, warnings: Vec<String>, outlined: bool, trust: bool, unit: f64) -> (Document, Vec<String>, bool) {
-    let Ok(data) = ai::decode_private(private) else { return (visible, warnings, false) };
-    if !has_layers(&data) {
-        return (visible, warnings, false);
+    match read_editing(private, trust) {
+        Some(read) => layered_from(read, visible, warnings, outlined, trust, unit),
+        None => (visible, warnings, false),
     }
-    match build(&data, Some(&visible), Page::Artboard, outlined, trust, unit) {
+}
+
+/// DanCard fork: the editing copy of a `.ai` (`private`, as [`layered_ai`] takes it) decoded and
+/// read, ahead of [`layered_from`], so that it can be read while the PDF part is (heavy files open
+/// sooner). `None` when it can't be decoded or has no layers (the PDF part is the document).
+pub struct EditingRead {
+    data: Vec<u8>,
+    read: Result<Structure, String>,
+}
+
+/// [`EditingRead`] of `private` (`trust` as [`layered_ai`] takes it).
+pub fn read_editing(private: &[u8], trust: bool) -> Option<EditingRead> {
+    let data = ai::decode_private(private).ok()?;
+    if !has_layers(&data) {
+        return None;
+    }
+    let read = read_structure(&data, false, trust);
+    Some(EditingRead { data, read })
+}
+
+/// [`layered_ai`] of the editing copy `editing` ([`read_editing`]).
+pub fn layered_from(
+    editing: EditingRead,
+    visible: Document,
+    warnings: Vec<String>,
+    outlined: bool,
+    trust: bool,
+    unit: f64,
+) -> (Document, Vec<String>, bool) {
+    let EditingRead { data, read } = editing;
+    match build_from(read, &data, Some(&visible), Page::Artboard, outlined, trust, unit) {
         Ok((mut done, notes)) => {
             done.setup.bleed = visible.setup.bleed;
             let mut all = warnings;
@@ -1291,7 +1389,7 @@ pub fn ai_alone_trusting(private: &[u8]) -> Result<(Document, Vec<String>), Stri
 
 /// Does the editing data (or a program in the legacy format) have layers?
 fn has_layers(data: &[u8]) -> bool {
-    data.windows(15).any(|w| w == b"%AI5_BeginLayer")
+    memchr::memmem::find(data, b"%AI5_BeginLayer").is_some()
 }
 
 /// The editing copy of the art in the PostScript `ps`: an EPS's private data, else the program
