@@ -465,33 +465,84 @@ fn hit_any(n: &Node, p: Point, opt: HitOptions, symbols: &SymbolBoxes) -> Option
 }
 
 /// Objects (children of layers, or of `scope` in isolation mode) touched by a marquee rect. Symbol
-/// instances are measured by their art ([`Node::geometric_bounds_with`]).
+/// instances are measured by their art ([`Node::geometric_bounds_with`]). What a clipping path
+/// hides isn't touched (DanCard fork, IN Vĩnh Phát), as a click only picks a clipping group inside
+/// its clipping path ([`hit_test`]): a clipping group is touched at its clipping path, or by what it
+/// clips when the marquee lies inside the clipping path; so are the objects of a layer with a
+/// clipping mask, and those of a clipping group in isolation mode. (When the marquee crosses the
+/// clipping path, what it clips is measured within the clipping path's box.)
 pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> Vec<NodeId> {
     let mut out = Vec::new();
-    let tops: Vec<&std::sync::Arc<Node>> = match scope.and_then(|s| doc.node(s)) {
-        Some(s) => match s.children() {
-            Some(c) => c.iter().collect(),
-            // A single object isolated: only it.
-            None => doc.parent_of(s.id).and_then(|p| doc.node(p)).and_then(Node::children).into_iter().flatten().filter(|c| c.id == s.id).collect(),
-        },
+    let symbols = doc.symbol_boxes();
+    // Each object, with the part of the marquee the clipping paths around it show it in (`None`:
+    // they hide it all there).
+    let tops: Vec<(&std::sync::Arc<Node>, Option<Rect>)> = match scope.and_then(|s| doc.node(s)) {
+        Some(s) => {
+            // What the clipping groups and layers around the isolated object show.
+            let shown = doc.ancestry(s.id).map_or(Some(r), |chain| around(doc, &chain, &symbols, r));
+            match s.children() {
+                Some(c) => {
+                    let inner = if s.clips() { shown.and_then(|r| shown_by(c.first()?, &symbols, r)) } else { shown };
+                    c.iter().enumerate().map(|(i, c)| (c, if i == 0 && s.clips() { shown } else { inner })).collect()
+                }
+                // A single object isolated: only it.
+                None => doc
+                    .parent_of(s.id)
+                    .and_then(|p| doc.node(p))
+                    .and_then(Node::children)
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| c.id == s.id)
+                    .map(|c| (c, shown))
+                    .collect(),
+            }
+        }
         // The objects of the layers, looking through sublayers (hidden, locked and template ones
         // are left out).
         None => doc
             .layers
             .iter()
             .filter(|l| l.visible && !l.locked && !l.is_template() && doc.pattern_edit.as_ref().is_none_or(|e| e.layer == l.id))
-            .flat_map(|l| layer_objects(l))
+            .flat_map(|l| layer_objects(l, Some(r), &symbols))
             .collect(),
     };
-    fn layer_objects(l: &Node) -> Vec<&std::sync::Arc<Node>> {
+    /// The part of `r` the clipping path `mask` shows what it clips in: all of it when it lies
+    /// inside the clipping path, none when it lies outside, and the clipping path's box within it
+    /// when the clipping path crosses it.
+    fn shown_by(mask: &Node, s: &SymbolBoxes, r: Rect) -> Option<Rect> {
+        if touches(mask, s, r) { mask.geometric_bounds_with(s).map(|b| b.intersect(r)) } else { inside(mask, s, r.center()).then_some(r) }
+    }
+    /// Is `p` inside the clipping path `mask`? (Its box first, which is quicker.)
+    fn inside(mask: &Node, s: &SymbolBoxes, p: Point) -> bool {
+        mask.geometric_bounds_with(s).is_some_and(|b| b.x0 <= p.x && p.x <= b.x1 && b.y0 <= p.y && p.y <= b.y1) && clip_contains(mask, p)
+    }
+    /// The part of `r` the clipping groups and layers of `chain` (from a layer down to an object)
+    /// show the object in.
+    fn around(doc: &Document, chain: &[NodeId], s: &SymbolBoxes, r: Rect) -> Option<Rect> {
+        let mut shown = r;
+        for pair in chain.windows(2) {
+            let [a, next] = pair else { continue };
+            let Some(mask) = doc.node(*a).filter(|a| a.clips()).and_then(Node::children).and_then(|c| c.first()) else { continue };
+            // (A clipping path doesn't clip itself.)
+            if mask.id != *next {
+                shown = shown_by(mask, s, shown)?;
+            }
+        }
+        Some(shown)
+    }
+    fn layer_objects<'a>(l: &'a Node, shown: Option<Rect>, s: &SymbolBoxes) -> Vec<(&'a std::sync::Arc<Node>, Option<Rect>)> {
         let mut out = vec![];
-        for c in l.children().into_iter().flatten() {
+        let children = l.children().map(Vec::as_slice).unwrap_or_default();
+        // A layer's clipping mask (its first object) clips the rest.
+        let inner = if l.clips() { shown.and_then(|r| shown_by(children.first()?, s, r)) } else { shown };
+        for (i, c) in children.iter().enumerate() {
+            let shown = if i == 0 && l.clips() { shown } else { inner };
             if c.is_layer() {
                 if c.visible && !c.locked && !c.is_template() {
-                    out.extend(layer_objects(c));
+                    out.extend(layer_objects(c, shown, s));
                 }
             } else {
-                out.push(c);
+                out.push((c, shown));
             }
         }
         out
@@ -499,6 +550,12 @@ pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> 
     fn touches(n: &Node, s: &SymbolBoxes, r: Rect) -> bool {
         match &n.kind {
             NodeKind::Path { path, .. } => vectorcraft_geom::hit::intersects_rect(path, r),
+            // At the clipping path; or, when its outline doesn't cross the marquee, the marquee
+            // lies inside it (all it clips there shows) or outside (all is hidden).
+            NodeKind::Layer { children, clip: true, .. } | NodeKind::Group { children, clip: true } => {
+                let Some((mask, content)) = children.split_first() else { return false };
+                touches(mask, s, r) || inside(mask, s, r.center()) && content.iter().any(|c| c.visible && touches(c, s, r))
+            }
             NodeKind::Layer { children, .. } | NodeKind::Group { children, .. } | NodeKind::Compound { children, .. } => {
                 children.iter().any(|c| c.visible && touches(c, s, r))
             }
@@ -526,14 +583,14 @@ pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> 
             }
         }
     }
-    let symbols = doc.symbol_boxes();
-    for t in tops {
+    for (t, shown) in tops {
         if !t.visible || t.locked {
             continue;
         }
         if leaves {
+            // (The Direct Selection tool selects the anchors a clipping path hides too.)
             collect_leaves(t, &symbols, r, &mut out);
-        } else if touches(t, &symbols, r) {
+        } else if shown.is_some_and(|r| touches(t, &symbols, r)) {
             out.push(t.id);
         }
     }
@@ -594,6 +651,75 @@ mod tests {
         assert_eq!(marquee(&d, Rect::new(40.0, 40.0, 70.0, 70.0), None, false), vec![small]);
         // Reaching the background's edge takes it too.
         assert_eq!(marquee(&d, Rect::new(-5.0, 40.0, 70.0, 70.0), None, false), vec![back, small]);
+    }
+
+    /// What a clipping path hides isn't touched by a marquee (DanCard fork): a card clipped to its
+    /// trim box, whose art runs far outside it, is picked only where it shows; so is the art of a
+    /// layer with a clipping mask, and of a clipping group in isolation mode.
+    #[test]
+    fn a_marquee_doesnt_touch_what_a_clip_hides() {
+        let rect = |id, r: Rect| Node::path(id, shapes::rectangle(r), Appearance::default_art());
+        let clip_group = |id, children: Vec<Node>| {
+            let mut g = Node::group(id, children.into_iter().map(Arc::new).collect());
+            g.set_clips(true);
+            g
+        };
+        let mut d = Document::new(400.0, 400.0);
+        let l = d.layers[0].id;
+        let (card, mask, art) = (d.alloc_id(), d.alloc_id(), d.alloc_id());
+        // The art runs 150 above the card, 100 to its right and 10 below and to its left.
+        let g = clip_group(card, vec![rect(mask, Rect::new(100.0, 200.0, 200.0, 260.0)), rect(art, Rect::new(90.0, 50.0, 300.0, 270.0))]);
+        d.insert(Some(l), 0, g).unwrap();
+        let none = Vec::<NodeId>::new();
+        // Over the hidden art (its edges cross the marquee there): nothing.
+        assert_eq!(marquee(&d, Rect::new(80.0, 40.0, 220.0, 150.0), None, false), none, "above the card");
+        assert_eq!(marquee(&d, Rect::new(250.0, 100.0, 320.0, 240.0), None, false), none, "to its right");
+        assert_eq!(marquee(&d, Rect::new(85.0, 240.0, 95.0, 280.0), None, false), none, "left of it");
+        // Over the card's edge, or over art it shows, inside it: the card.
+        assert_eq!(marquee(&d, Rect::new(80.0, 180.0, 120.0, 220.0), None, false), vec![card]);
+        let (inner, inner_mask, inner_art) = (d.alloc_id(), d.alloc_id(), d.alloc_id());
+        let ig =
+            clip_group(inner, vec![rect(inner_mask, Rect::new(120.0, 210.0, 180.0, 250.0)), rect(inner_art, Rect::new(130.0, 215.0, 170.0, 245.0))]);
+        d.insert(Some(card), 2, ig).unwrap();
+        assert_eq!(marquee(&d, Rect::new(125.0, 212.0, 140.0, 225.0), None, false), vec![card], "art it shows, inside the card");
+        // Isolation mode in the card: what it hides isn't touched either.
+        assert_eq!(marquee(&d, Rect::new(80.0, 40.0, 220.0, 150.0), Some(card), false), none);
+        assert_eq!(marquee(&d, Rect::new(80.0, 180.0, 110.0, 205.0), Some(card), false), vec![mask]);
+        assert_eq!(marquee(&d, Rect::new(125.0, 212.0, 140.0, 225.0), Some(card), false), vec![inner]);
+        // …nor in a group inside the card, clipped by the card.
+        let sub = d.alloc_id();
+        let (sa, sb) = (d.alloc_id(), d.alloc_id());
+        let sg = Node::group(
+            sub,
+            vec![Arc::new(rect(sa, Rect::new(150.0, 230.0, 190.0, 250.0))), Arc::new(rect(sb, Rect::new(250.0, 20.0, 280.0, 60.0)))],
+        );
+        d.insert(Some(card), 3, sg).unwrap();
+        assert_eq!(marquee(&d, Rect::new(240.0, 10.0, 290.0, 70.0), Some(sub), false), none, "hidden by the card");
+        assert_eq!(marquee(&d, Rect::new(145.0, 225.0, 160.0, 240.0), Some(sub), false), vec![sa]);
+        // Direct Selection still reaches what the clip hides.
+        assert_eq!(marquee(&d, Rect::new(240.0, 10.0, 290.0, 70.0), None, true), vec![art, sb]);
+
+        // A clipping path that isn't a rectangle: over hidden art inside the corner of its box.
+        let mut d = Document::new(400.0, 400.0);
+        let l = d.layers[0].id;
+        let (card, mask, art) = (d.alloc_id(), d.alloc_id(), d.alloc_id());
+        let disc = Node::path(mask, shapes::ellipse(Rect::new(100.0, 200.0, 200.0, 300.0)), Appearance::default_art());
+        d.insert(Some(l), 0, clip_group(card, vec![disc, rect(art, Rect::new(105.0, 150.0, 300.0, 350.0))])).unwrap();
+        assert_eq!(marquee(&d, Rect::new(101.0, 201.0, 112.0, 212.0), None, false), none, "outside the disc");
+        assert_eq!(marquee(&d, Rect::new(100.0, 240.0, 112.0, 260.0), None, false), vec![card], "across the disc's edge");
+
+        // A layer with a clipping mask: its objects are touched where the mask shows them.
+        let mut d = Document::new(400.0, 400.0);
+        let l = d.layers[0].id;
+        let (lm, la) = (d.alloc_id(), d.alloc_id());
+        d.insert(Some(l), 0, rect(lm, Rect::new(100.0, 200.0, 200.0, 260.0))).unwrap();
+        d.insert(Some(l), 1, rect(la, Rect::new(150.0, 230.0, 300.0, 300.0))).unwrap();
+        if let Some(layer) = d.node_mut(l) {
+            layer.set_clips(true);
+        }
+        assert_eq!(marquee(&d, Rect::new(220.0, 240.0, 320.0, 320.0), None, false), none, "its hidden part");
+        assert_eq!(marquee(&d, Rect::new(140.0, 225.0, 160.0, 240.0), None, false), vec![la]);
+        assert_eq!(marquee(&d, Rect::new(80.0, 180.0, 120.0, 220.0), None, false), vec![lm]);
     }
 
     #[test]
