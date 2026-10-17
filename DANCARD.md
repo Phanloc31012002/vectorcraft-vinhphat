@@ -126,10 +126,18 @@ build đã làm, mới có. Release có:
   Start, thêm Công cụ bình vào Open with của .ai .eps .pdf .svg .vectorcraft (không đổi app mặc định),
   rồi mở app. Chạy lại file này bất cứ lúc nào để cài lại bản mới nhất (đóng app trước); bản đang
   cài chỉ bị xóa khi bản mới đã vào chỗ, hỏng giữa chừng thì bản cũ quay lại.
+- **Cuối panel Công cụ bình** (từ bản 11) có dòng báo cập nhật: đang kiểm tra, đang tải bản N, đã tải
+  bản N, đang dùng bản mới nhất, kèm nút: **Kiểm tra cập nhật** (kiểm tra ngay, không chờ một giờ),
+  **Cập nhật ngay** (app đóng như bấm nút đóng, hỏi lưu file chưa lưu, rồi tự mở lại bằng bản mới).
+  App giải nén từ zip hay cài bằng .msi không tự cập nhật: dòng đó báo vậy (và có bản mới hơn chưa),
+  nút **Cài bản tự cập nhật** đóng app rồi mở bộ cài (cửa sổ PowerShell) cài bản tự cập nhật.
 - **Xem app đã tự cập nhật thế nào:** `%LOCALAPPDATA%\CongCuBinh\update\update.log`.
 - **Sau đó không phải làm gì:** mỗi lần `dancard` có build mới (push của Claude, hay workflow đồng bộ
   VectorCraft sáng thứ Hai), Releases có bản mới, các máy tự tải trong vòng một giờ và dùng từ lần mở
   app sau.
+- **VectorCraft gốc có bản mới, muốn mọi máy có ngay:** GitHub › Actions › **DanCard đồng bộ
+  VectorCraft** › Run workflow (cần `dancard` là nhánh mặc định, xem dưới): gộp, kiểm tra, đẩy lên
+  `dancard`, build bản mới; các máy tự tải như trên, hoặc bấm Kiểm tra cập nhật.
 - Muốn dùng bản này làm app mặc định cho file .ai: chuột phải file › Open with › Choose another app ›
   Công cụ bình › Always. Bản cài .msi cũ (nếu có) gỡ ở Settings › Apps cho khỏi nhầm.
 
@@ -201,7 +209,7 @@ Chỉ những file này có thể đụng nhau khi gộp; mọi thứ khác là 
 | `crates/eps/src/import/mod.rs`, `import/native.rs`, `crates/eps/src/lib.rs` | `import_trusting` (EPS dùng bản chỉnh sửa cả khi vẽ khác trang), `layered` nhận `trust`; `build`: tin bản chỉnh sửa thì đọc bằng `ai::read_trusting`; `ai_alone_trusting` (gom group theo bản chỉnh sửa) |
 | `crates/eps/src/import/ai/mod.rs` | `pub(crate) use read::read_trusting`; `MAX_DATA`: bản chỉnh sửa đọc tới 1 GB ở bản 64-bit (gốc 256 MB), bản web giữ 256 MB; quá 1 GB thì `Codec::decode` giải nén lại bằng `dancard_compact` (file mới): ảnh lớn thành JPEG, không vừa thì giảm độ phân giải; `Cargo.toml` của eps thêm `jpeg-encoder` (đã có trong workspace) |
 | `crates/ui-egui/src/dialogs/import_pdf.rs`, `dialogs/tests_import_pdf.rs` | `offer`: file .ai / PDF có bản chỉnh sửa mở không hỏi chọn trang, kèm test |
-| `apps/vectorcraft/src/main.rs` | một cửa sổ: `mod single_instance`, `--new-window`, mở file nhận được thành tab (`single_instance.rs` là file mới); tự cập nhật: `mod dancard_update` (file mới), `may_apply` + `apply_pending` ở đầu `main` (trước khi đọc tham số, trước log; `--version`, `--help` không áp bản mới), `start_checker` và `set_build` khi tạo cửa sổ, `take_notice` trong `logic_frame`, `--version` in số bản; `USAGE` (`--help`) có `--new-window` |
+| `apps/vectorcraft/src/main.rs` | một cửa sổ: `mod single_instance`, `--new-window`, mở file nhận được thành tab (`single_instance.rs` là file mới); tự cập nhật: `mod dancard_update` (file mới), `may_apply` + `apply_pending` ở đầu `main` (trước khi đọc tham số, trước log; `--version`, `--help` không áp bản mới), `start_checker` và `set_build` khi tạo cửa sổ, `on_frame` trong `logic_frame`, `dancard_update::on_exit()` trong `on_exit` (Cập nhật ngay / Cài bản tự cập nhật), tham số `--dancard-restart` không phải file, `--version` in số bản; `USAGE` (`--help`) có `--new-window` |
 | `apps/vectorcraft/Cargo.toml`, `Cargo.lock` | `sha2` cho app (kiểm SHA-256 bản tải về; cùng bản crate PDF đang dùng) |
 
 Khi sửa chỗ đụng nhau: giữ phần mới của VectorCraft, thêm lại đúng phần DanCard ghi ở bảng trên.

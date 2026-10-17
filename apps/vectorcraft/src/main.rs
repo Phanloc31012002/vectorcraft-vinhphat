@@ -118,6 +118,9 @@ impl eframe::App for App {
         #[cfg(not(target_os = "macos"))]
         single_instance::closing();
         file_access::unconfined(|| save_prefs(&self.app));
+        // The DanCard panel's Cập nhật ngay / Cài bản tự cập nhật: started as the window goes.
+        #[cfg(not(target_os = "macos"))]
+        dancard_update::on_exit();
         end_before_teardown(self.frames);
     }
     #[cfg(feature = "windows7")]
@@ -125,6 +128,8 @@ impl eframe::App for App {
         #[cfg(not(target_os = "macos"))]
         single_instance::closing();
         file_access::unconfined(|| save_prefs(&self.app));
+        #[cfg(not(target_os = "macos"))]
+        dancard_update::on_exit();
     }
 }
 
@@ -715,6 +720,8 @@ fn main() -> std::process::ExitCode {
         match a.as_str() {
             "--in-window-menus" => in_window_menus = true,
             "--new-window" => new_window = true,
+            // The DanCard fork's restart after Cập nhật ngay (`dancard_update::RESTART_ARG`), not a file.
+            "--dancard-restart" => {}
             "--version" => {
                 // The DanCard fork's build number, when its workflow made this build (its release
                 // step checks it is there: without it, installs never update).

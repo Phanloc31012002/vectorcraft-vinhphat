@@ -11,6 +11,13 @@
 //!   later); it must start on this machine and be that build (`--version`); its files are written
 //!   through to the disk, and only then is it marked ready in `CongCuBinh\update\next`. The status
 //!   bar and the DanCard panel say so. Nothing is asked: the work in progress goes on.
+//! - The DanCard panel's last line says where updates are (checking, downloading build N, build N
+//!   ready, the newest), with a button: Kiểm tra cập nhật (check now), Cập nhật ngay (the window
+//!   closes, asking about unsaved documents as it always does, and starts again with
+//!   [`RESTART_ARG`], which waits for it to be gone, then applies the build). A numbered build that
+//!   isn't the per-user install (a zip unpacked, an `.msi` install) says it doesn't update, and
+//!   whether Releases has a newer build, with Cài bản tự cập nhật: as it closes, it starts this
+//!   build's copy of the installer in a console window of its own.
 //! - The next start applies it, first thing and only when no other window of the app runs. The list
 //!   of the files about to move is written to the disk first (`swap.json`); then each file the
 //!   update replaces is renamed aside (`.old`: the running exe can be renamed, not overwritten) and
@@ -32,11 +39,12 @@ use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use vectorcraft_ui_egui::panels::dancard::{UpdateRequest, UpdateStatus};
 
 /// The newest release's description of its build.
 const LATEST: &str = "https://github.com/Phanloc31012002/vectorcraft-vinhphat/releases/latest/download/latest.json";
@@ -106,6 +114,23 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The message for the status bar, taken by the window.
 static NOTICE: Mutex<Option<String>> = Mutex::new(None);
+/// The checker waits on this between checks: Kiểm tra cập nhật wakes it.
+static WAKE: Mutex<bool> = Mutex::new(false);
+static WAKE_SIGNAL: Condvar = Condvar::new();
+/// What the window does as it closes, asked for on the DanCard panel (and when).
+static ON_EXIT: Mutex<Option<(UpdateRequest, Instant)>> = Mutex::new(None);
+/// A start that the window before it asked for as it closed (Cập nhật ngay): it waits for that
+/// window to be gone (at most [`RESTART_WAIT`]) to apply the downloaded build.
+const RESTART_ARG: &str = "--dancard-restart";
+const RESTART_WAIT: Duration = Duration::from_secs(30);
+/// A restart or an install asked for on the panel happens when the window closes this soon after:
+/// one whose closing was cancelled (to keep working) isn't done at a much later close.
+const ON_EXIT_FOR: Duration = Duration::from_secs(600);
+/// This build's copy of the per-user installer, for builds that don't update (Cài bản tự cập nhật).
+const INSTALLER: &str = include_str!("../../../packaging/dancard/CaiDat-CongCuBinh.cmd");
+/// Windows: start a program in a console window of its own (the installer shows what it does).
+#[cfg(windows)]
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
 /// This build's number, when the fork's workflow made it (local builds have none and never update).
 pub fn build() -> Option<u64> {
@@ -135,6 +160,74 @@ fn set_notice(text: String) {
     *NOTICE.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
 }
 
+/// Where updates are, on the DanCard panel.
+fn status(s: UpdateStatus) {
+    vectorcraft_ui_egui::panels::dancard::set_update_status(s);
+}
+
+/// Wait `d`, or until Kiểm tra cập nhật wakes the checker.
+fn wait_or_woken(d: Duration) {
+    let deadline = Instant::now() + d;
+    let mut woken = WAKE.lock().unwrap_or_else(PoisonError::into_inner);
+    while !*woken {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        woken = match WAKE_SIGNAL.wait_timeout(woken, left) {
+            Ok((guard, _)) => guard,
+            Err(poisoned) => poisoned.into_inner().0,
+        };
+    }
+    *woken = false;
+}
+
+fn wake_checker() {
+    *WAKE.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    WAKE_SIGNAL.notify_all();
+}
+
+/// A restart or an install asked for at `at` is still due at `now` (the window closes soon after).
+fn due(at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(at) <= ON_EXIT_FOR
+}
+
+/// The window is closing (its last frame drawn, the unsaved documents asked about): a restart or
+/// an install asked for on the DanCard panel in the last minutes starts now.
+pub fn on_exit() {
+    let Some((request, at)) = ON_EXIT.lock().unwrap_or_else(PoisonError::into_inner).take() else { return };
+    if !due(at, Instant::now()) {
+        return;
+    }
+    let started = match request {
+        UpdateRequest::Restart => std::env::current_exe().and_then(|exe| Command::new(exe).arg(RESTART_ARG).spawn()).map(drop),
+        UpdateRequest::Install => run_installer(),
+        UpdateRequest::Check => Ok(()),
+    };
+    if let Err(e) = started {
+        log::warn!("DanCard update: {request:?} didn't start ({e})");
+    }
+}
+
+/// This build's copy of the per-user installer, written to the temp folder and started in a
+/// console window of its own: it downloads the newest build, checks it, installs it with its
+/// shortcuts and starts it.
+fn run_installer() -> std::io::Result<()> {
+    let dir = std::env::temp_dir().join("CongCuBinh-cai-dat");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("CaiDat-CongCuBinh.cmd");
+    std::fs::write(&path, INSTALLER)?;
+    let mut command = Command::new(&path);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_NEW_CONSOLE);
+    command.spawn().map(drop)
+}
+
+/// `args` without [`RESTART_ARG`]: what the build applied at a restart starts with.
+fn without_restart(args: &[OsString]) -> Vec<OsString> {
+    args.iter().filter(|a| *a != RESTART_ARG).cloned().collect()
+}
+
 /// Each frame of the window (`ctx`): the second one ends this build's trial (its window was drawn,
 /// so the files it replaced can go) → the status bar's message about updates, once.
 pub fn on_frame(ctx: &egui::Context) -> Option<String> {
@@ -161,6 +254,16 @@ pub fn on_frame(ctx: &egui::Context) -> Option<String> {
             }
         }
         Err(_) => {}
+    }
+    match vectorcraft_ui_egui::panels::dancard::take_update_request() {
+        Some(UpdateRequest::Check) => wake_checker(),
+        // The window closes as its close button closes it (unsaved documents asked about first);
+        // the restart or the install starts as it goes (`on_exit`).
+        Some(request) => {
+            *ON_EXIT.lock().unwrap_or_else(PoisonError::into_inner) = Some((request, Instant::now()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        None => {}
     }
     NOTICE.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
@@ -558,7 +661,7 @@ fn fetch(update: &Path, release: &Release) -> Result<(), (bool, String)> {
 
 /// Download the newest release into `root\update\next` when [`wanted`] → the build made ready, if
 /// one was. Waits its turn with the other windows' checks (`update.lock`).
-fn check_and_download(root: &Path, current: u64) -> Result<Option<u64>, String> {
+fn check_and_download(root: &Path, current: u64, downloading: &dyn Fn(u64)) -> Result<Option<u64>, String> {
     let update = root.join(UPDATE);
     std::fs::create_dir_all(&update).map_err(|e| e.to_string())?;
     with_lock_wait(&update, || {
@@ -567,6 +670,7 @@ fn check_and_download(root: &Path, current: u64) -> Result<Option<u64>, String> 
         if !wanted(&update, current, release.build) || backing_off(&update, release.build) {
             return Ok(None);
         }
+        downloading(release.build);
         match fetch(&update, &release) {
             Ok(()) => {
                 // Best effort: an old count only delays a later try of this build.
@@ -588,27 +692,70 @@ fn check_and_download(root: &Path, current: u64) -> Result<Option<u64>, String> 
 /// and download it; `ctx` repaints for the status bar's message. Nothing for builds that don't
 /// update.
 pub fn start_checker(ctx: &egui::Context) {
-    let Some((root, current)) = updating() else { return };
+    let Some((root, current)) = updating() else {
+        installer_check(ctx);
+        return;
+    };
+    // A build downloaded at an earlier run and not applied yet (another window ran then).
+    let ready = |root: &Path| ready_build(&root.join(UPDATE)).filter(|b| *b > current);
+    status(ready(&root).map_or(UpdateStatus::Idle, UpdateStatus::Ready));
     let ctx = ctx.clone();
     let spawned = std::thread::Builder::new().name("dancard-update".into()).spawn(move || {
-        std::thread::sleep(FIRST_CHECK);
+        wait_or_woken(FIRST_CHECK);
         loop {
-            match check_and_download(&root, current) {
+            status(UpdateStatus::Checking);
+            ctx.request_repaint();
+            let downloading = |build| {
+                status(UpdateStatus::Downloading(build));
+                ctx.request_repaint();
+            };
+            match check_and_download(&root, current, &downloading) {
                 Ok(Some(build)) => {
                     note(&root.join(UPDATE), &format!("build {build} downloaded, used from the next start"));
-                    set_notice(format!("DanCard: đã tải bản mới (bản {build}): đóng rồi mở lại app là dùng bản mới."));
-                    vectorcraft_ui_egui::panels::dancard::set_update_ready(build);
-                    ctx.request_repaint();
+                    set_notice(format!(
+                        "DanCard: đã tải bản mới (bản {build}): bấm Cập nhật ngay ở cuối panel Công cụ bình, hoặc đóng rồi mở lại app."
+                    ));
+                    status(UpdateStatus::Ready(build));
                 }
-                Ok(None) => {}
+                Ok(None) => status(ready(&root).map_or(UpdateStatus::UpToDate, UpdateStatus::Ready)),
                 // No network, GitHub unreachable…: try again later.
-                Err(e) => note(&root.join(UPDATE), &e),
+                Err(e) => {
+                    note(&root.join(UPDATE), &e);
+                    status(ready(&root).map_or(UpdateStatus::Failed, UpdateStatus::Ready));
+                }
             }
-            std::thread::sleep(EVERY);
+            ctx.request_repaint();
+            wait_or_woken(EVERY);
         }
     });
     if let Err(e) = spawned {
         log::warn!("DanCard update: no checks ({e})");
+    }
+}
+
+/// A numbered build on Windows that isn't the per-user install (a zip unpacked, an `.msi`
+/// install) doesn't update: the panel offers the installer, and says whether Releases has a newer
+/// build (read once, half a minute after the start).
+fn installer_check(ctx: &egui::Context) {
+    let Some(current) = build().filter(|_| cfg!(windows)) else { return };
+    status(UpdateStatus::NotInstalled(None));
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new().name("dancard-newest".into()).spawn(move || {
+        std::thread::sleep(FIRST_CHECK);
+        let dir = std::env::temp_dir().join("CongCuBinh-kiem-tra");
+        let newest = std::fs::create_dir_all(&dir)
+            .ok()
+            .and_then(|()| download(LATEST, &dir, "latest.json").ok())
+            .and_then(|latest| read_capped(&latest, MAX_JSON).ok())
+            .and_then(|text| parse_release(&text).ok())
+            .map(|r| r.build);
+        if let Some(newest) = newest.filter(|n| *n > current) {
+            status(UpdateStatus::NotInstalled(Some(newest)));
+            ctx.request_repaint();
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("DanCard update: no check of the newest build ({e})");
     }
 }
 
@@ -1008,13 +1155,22 @@ pub fn apply_pending(settings: &Path, args: &[OsString]) -> bool {
     let Some((root, current)) = updating() else { return false };
     let update = root.join(UPDATE);
     let count = std::env::var_os(GPU_SKIP).is_none();
-    // `None`: another window runs from these files, or holds `update`.
-    let Some(Some(Start::Restart(applied))) = crate::single_instance::alone(settings, || with_lock(&update, || at_start(&root, current, count)))
-    else {
+    // Cập nhật ngay: the window that asked for this start is closing; it is waited for.
+    let restarting = args.iter().any(|a| a == RESTART_ARG);
+    let deadline = Instant::now() + if restarting { RESTART_WAIT } else { Duration::ZERO };
+    let started = loop {
+        // `None`: another window runs from these files.
+        match crate::single_instance::alone(settings, || with_lock(&update, || at_start(&root, current, count))) {
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
+            done => break done,
+        }
+    };
+    // `Some(None)`: another window holds `update`.
+    let Some(Some(Start::Restart(applied))) = started else {
         return false;
     };
     let exe = root.join(APP).join(EXE);
-    match Command::new(&exe).args(args).spawn() {
+    match Command::new(&exe).args(without_restart(args)).spawn() {
         Ok(_) => true,
         Err(e) => {
             note(&update, &format!("{} doesn't start ({e})", exe.display()));
@@ -1411,6 +1567,36 @@ mod tests {
         std::fs::write(dir.join(EXE), "exe").unwrap();
         assert_eq!(find_app_dir(&dir), Some(dir.clone()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cập nhật ngay: the start the closing window asks for waits for it, and the build it applies
+    /// starts without that argument; a request is done only at a close soon after it.
+    #[test]
+    fn a_restart_asked_for_on_the_panel() {
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(without_restart(&args(&[RESTART_ARG, "a.ai"])), args(&["a.ai"]));
+        // The app takes the argument for what it is, not a file to open.
+        assert!(include_str!("main.rs").contains(&format!("\"{RESTART_ARG}\" => {{}}")));
+        assert!(may_apply(&args(&[RESTART_ARG])) || std::env::var_os("VECTORCRAFT_CONTROL_PORT").is_some());
+        let now = Instant::now();
+        assert!(due(now, now + Duration::from_secs(5)));
+        assert!(!due(now, now + ON_EXIT_FOR + Duration::from_secs(1)));
+        // Kiểm tra cập nhật wakes the checker before its hour is up.
+        let woken = std::thread::spawn(|| {
+            let t = Instant::now();
+            wait_or_woken(Duration::from_secs(60));
+            t.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        wake_checker();
+        assert!(woken.join().unwrap() < Duration::from_secs(30));
+    }
+
+    /// Cài bản tự cập nhật starts this build's copy of the installer, as cmd.exe runs it.
+    #[test]
+    fn the_installer_is_this_builds_copy() {
+        assert!(INSTALLER.starts_with("@echo off\r\n") && INSTALLER.contains("#POWERSHELL"));
+        assert!(INSTALLER.contains("portable.txt"), "it drops upstream's portable mode too");
     }
 
     /// Upstream's portable zip switches on portable mode with a file beside the exe: a build taken

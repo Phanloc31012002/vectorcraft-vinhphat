@@ -42,8 +42,42 @@ mod variable;
 
 /// Số bản của lần build này (workflow của fork đặt, app báo lại lúc mở; bản build tay không có).
 static BUILD: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-/// Bản mới hơn đã tải về, dùng từ lần mở app sau (0: chưa có).
-static UPDATE_READY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Việc tự cập nhật đang tới đâu (`dancard_update` của app báo).
+static UPDATE: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::None);
+/// Nút cập nhật vừa bấm, chờ app lấy (`take_update_request`).
+static REQUEST: std::sync::Mutex<Option<UpdateRequest>> = std::sync::Mutex::new(None);
+
+/// Việc tự cập nhật của bản cài cho xưởng (`dancard_update` của app), hiện ở cuối panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// Không có gì để báo (bản build tay, máy không phải Windows).
+    None,
+    /// Bản cài tự cập nhật, chưa kiểm tra lần nào.
+    Idle,
+    /// Đang xem bản mới nhất trên Releases.
+    Checking,
+    /// Đang dùng bản mới nhất.
+    UpToDate,
+    /// Đang tải bản này.
+    Downloading(u64),
+    /// Bản này đã tải và thử xong, dùng từ lần mở app sau.
+    Ready(u64),
+    /// Chưa kiểm tra được (mạng, GitHub).
+    Failed,
+    /// Bản này (zip giải nén, bản cài .msi) không tự cập nhật; bản mới nhất trên Releases, nếu đã biết.
+    NotInstalled(Option<u64>),
+}
+
+/// Nút cập nhật trên panel: app làm việc đó (`dancard_update`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateRequest {
+    /// Kiểm tra bản mới ngay.
+    Check,
+    /// Đóng app (hỏi lưu như thường) rồi mở lại bằng bản đã tải.
+    Restart,
+    /// Đóng app rồi chạy bộ cài bản tự cập nhật.
+    Install,
+}
 
 /// Số bản của lần build này, hiện ở chân panel.
 pub fn set_build(build: u64) {
@@ -51,9 +85,53 @@ pub fn set_build(build: u64) {
     let _ = BUILD.set(build);
 }
 
-/// Bản `build` đã tải về (`dancard_update` của app): panel nhắc mở lại app để dùng.
+/// Việc tự cập nhật tới đâu (`dancard_update` của app), hiện ở cuối panel.
+pub fn set_update_status(status: UpdateStatus) {
+    *UPDATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
+}
+
+/// Bản `build` đã tải về: panel có nút Cập nhật ngay.
 pub fn set_update_ready(build: u64) {
-    UPDATE_READY.store(build, std::sync::atomic::Ordering::Relaxed);
+    set_update_status(UpdateStatus::Ready(build));
+}
+
+fn update_status() -> UpdateStatus {
+    UPDATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// Nút cập nhật bấm từ lần lấy trước (app lấy mỗi khung hình).
+pub fn take_update_request() -> Option<UpdateRequest> {
+    REQUEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+}
+
+fn request_update(r: UpdateRequest) {
+    *REQUEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r);
+}
+
+/// Dòng báo cập nhật cho `status` (bản đang chạy là `build`): chữ, chữ đậm hay không, nút (nhãn,
+/// việc). `None`: không hiện dòng nào.
+fn update_line(status: &UpdateStatus, build: Option<u64>) -> Option<(String, bool, Option<(&'static str, UpdateRequest)>)> {
+    let check = Some(("Kiểm tra cập nhật", UpdateRequest::Check));
+    Some(match status {
+        UpdateStatus::None => return None,
+        UpdateStatus::Idle => ("Bản này tự cập nhật từ Releases.".into(), false, check),
+        UpdateStatus::Checking => ("Đang kiểm tra bản mới…".into(), false, None),
+        UpdateStatus::UpToDate => ("Đang dùng bản mới nhất.".into(), false, check),
+        UpdateStatus::Downloading(b) => (format!("Đang tải bản {b}…"), false, None),
+        // Bản đang chạy đã là bản đó (vừa cập nhật xong): như mới nhất.
+        UpdateStatus::Ready(b) if build.is_some_and(|c| c >= *b) => ("Đang dùng bản mới nhất.".into(), false, check),
+        UpdateStatus::Ready(b) => {
+            (format!("Đã tải bản {b}: bấm Cập nhật ngay, hoặc đóng rồi mở lại app."), true, Some(("Cập nhật ngay", UpdateRequest::Restart)))
+        }
+        UpdateStatus::Failed => ("Chưa kiểm tra được bản mới (mạng?).".into(), false, Some(("Thử lại", UpdateRequest::Check))),
+        UpdateStatus::NotInstalled(newest) => {
+            let newer = match (newest, build) {
+                (Some(n), Some(c)) if n > &c => format!(" Đã có bản {n}."),
+                _ => String::new(),
+            };
+            (format!("Bản này không tự cập nhật.{newer}"), !newer.is_empty(), Some(("Cài bản tự cập nhật", UpdateRequest::Install)))
+        }
+    })
 }
 
 /// Chân panel: phiên bản, số bản (nếu có).
@@ -150,10 +228,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         // như mỗi tab của DanCard.
         // Kéo cạnh bảng cho to nhỏ (`dancard_panels`): phần thân vừa chiều cao đó; không thì cao tới
         // đáy cửa sổ.
-        let ready = UPDATE_READY.load(std::sync::atomic::Ordering::Relaxed);
-        let ready = (ready > BUILD.get().copied().unwrap_or(0)).then_some(ready);
-        // Chỗ cho dòng chân (và dòng báo bản mới, khi có).
-        let foot = if ready.is_some() { 64.0 } else { 40.0 };
+        let line = update_line(&update_status(), BUILD.get().copied());
+        // Chỗ cho dòng chân (và dòng báo cập nhật với nút, khi có).
+        let foot = if line.is_some() { 76.0 } else { 40.0 };
         let max_h = match crate::dancard_panels::body_height(ui.ctx(), ID) {
             Some(h) => (top + h - 2.0 * MARGIN - ui.cursor().top() - foot).max(80.0),
             None => (ui.ctx().content_rect().bottom() - ui.cursor().top() - foot - 8.0).max(160.0),
@@ -175,8 +252,22 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             }
             ui.add_space(4.0);
         });
-        if let Some(ready) = ready {
-            style::hint_strong(ui, &format!("Đã tải bản {ready}: đóng rồi mở lại app là dùng bản mới."));
+        if let Some((text, strong, button)) = line {
+            ui.horizontal_wrapped(|ui| {
+                if strong {
+                    style::hint_strong(ui, &text);
+                } else {
+                    style::hint(ui, &text);
+                }
+                if let Some((label, request)) = button
+                    && style::button(ui, label, true, false).clicked()
+                {
+                    request_update(request);
+                    if request == UpdateRequest::Check {
+                        set_update_status(UpdateStatus::Checking);
+                    }
+                }
+            });
         }
         style::footer(ui, &foot_text());
     });
@@ -832,6 +923,30 @@ mod tests {
 
     use crate::VectorcraftApp;
     use crate::tests_labels::painted_text;
+
+    /// Dòng cập nhật cuối panel: chữ và nút theo việc tự cập nhật đang tới đâu.
+    #[test]
+    fn dong_cap_nhat_cuoi_panel() {
+        use super::{UpdateRequest as R, UpdateStatus as S, update_line};
+        let button = |s: S, build: Option<u64>| update_line(&s, build).and_then(|l| l.2);
+        assert_eq!(update_line(&S::None, Some(10)), None);
+        assert_eq!(button(S::Idle, Some(10)), Some(("Kiểm tra cập nhật", R::Check)));
+        assert_eq!(button(S::UpToDate, Some(10)), Some(("Kiểm tra cập nhật", R::Check)));
+        assert_eq!(button(S::Checking, Some(10)), None);
+        let (text, _, b) = update_line(&S::Downloading(11), Some(10)).unwrap();
+        assert!(text.contains("Đang tải bản 11") && b.is_none(), "{text}");
+        let (text, strong, b) = update_line(&S::Ready(11), Some(10)).unwrap();
+        assert!(text.contains("Đã tải bản 11") && strong, "{text}");
+        assert_eq!(b, Some(("Cập nhật ngay", R::Restart)));
+        // Vừa lên đúng bản đó: như mới nhất.
+        assert_eq!(button(S::Ready(10), Some(10)), Some(("Kiểm tra cập nhật", R::Check)));
+        assert_eq!(button(S::Failed, Some(10)), Some(("Thử lại", R::Check)));
+        let (text, strong, b) = update_line(&S::NotInstalled(Some(12)), Some(10)).unwrap();
+        assert!(text.contains("không tự cập nhật") && text.contains("Đã có bản 12") && strong, "{text}");
+        assert_eq!(b, Some(("Cài bản tự cập nhật", R::Install)));
+        let (text, strong, _) = update_line(&S::NotInstalled(None), Some(10)).unwrap();
+        assert!(!text.contains("Đã có") && !strong, "{text}");
+    }
 
     #[test]
     fn hien_khung_xoay_cua_card_dang_chon() {
