@@ -83,16 +83,33 @@ try {
   Remove-Item -LiteralPath $prev, $unpack, $zip, $json -Recurse -Force -ErrorAction SilentlyContinue
   $target = Join-Path $app 'vectorcraft.exe'
 
-  # Lối tắt trên Desktop và trong Start.
+  # Lối tắt trên Desktop và trong Start. WScript.Shell không lưu được lối tắt khi đường dẫn có chữ
+  # ngoài bảng mã của Windows (chữ "ụ" của "Công cụ bình"): lưu ở một thư mục tên không dấu, đường
+  # dẫn trong lối tắt không dấu (dạng 8.3 khi thư mục người dùng có dấu), rồi chuyển sang với tên có
+  # dấu. Không tạo được lối tắt nào (phần mềm diệt virus chặn ghi lên Desktop…) thì báo rồi cài tiếp.
   $shell = New-Object -ComObject WScript.Shell
+  $fso = New-Object -ComObject Scripting.FileSystemObject
+  $plain = { param([string] $p, [bool] $folder)
+    if ($p -notmatch '[^\x00-\x7F]') { return $p }
+    try { if ($folder) { $fso.GetFolder($p).ShortPath } else { $fso.GetFile($p).ShortPath } } catch { $p }
+  }
+  $lnkDir = if ($work -match '[^\x00-\x7F]') { $env:PUBLIC } else { $work }
+  $made = @()
   foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
     if (-not $dir) { continue }
-    $lnk = $shell.CreateShortcut((Join-Path $dir "$name.lnk"))
-    $lnk.TargetPath = $target
-    $lnk.WorkingDirectory = $app
-    $lnk.IconLocation = "$target,0"
-    $lnk.Description = 'DanCard trên VectorCraft (tự cập nhật)'
-    $lnk.Save()
+    try {
+      $tmp = Join-Path $lnkDir 'CongCuBinh-loi-tat.lnk'
+      $lnk = $shell.CreateShortcut($tmp)
+      $lnk.TargetPath = & $plain $target $false
+      $lnk.WorkingDirectory = & $plain $app $true
+      $lnk.IconLocation = "$(& $plain $target $false),0"
+      $lnk.Description = 'Cong cu binh - DanCard tren VectorCraft (tu cap nhat)'
+      $lnk.Save()
+      Move-Item -LiteralPath $tmp -Destination (Join-Path $dir "$name.lnk") -Force
+      $made += $dir
+    } catch {
+      Write-Host "Khong tao duoc loi tat trong $dir ($($_.Exception.Message))" -ForegroundColor Yellow
+    }
   }
 
   # "Open with" (chuột phải › Open with), chỉ cho người dùng này.
@@ -114,7 +131,8 @@ try {
 
   Write-Host ''
   Write-Host "Da cai ban $($latest.build) vao $app"
-  Write-Host 'Co loi tat tren Desktop. Tu nay app tu tai ban moi: dong roi mo lai la dung ban moi.'
+  if ($made.Count -gt 0) { Write-Host 'Co loi tat Cong cu binh tren Desktop va trong Start.' } else { Write-Host "Mo app: $target" }
+  Write-Host 'Tu nay app tu tai ban moi: cuoi panel Cong cu binh co nut Cap nhat ngay.'
   Start-Process -FilePath $target
 } catch {
   Write-Host ''
