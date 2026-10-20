@@ -27,6 +27,8 @@ flate2 = { workspace = true }
 ruzstd = { workspace = true }
 # DanCard fork: the images of editing data too large to hold, kept as JPEG files (`dancard_compact`).
 jpeg-encoder = { workspace = true }
+# Images read through `CCITTFaxDecode`.
+hayro-ccitt = { workspace = true }
 # Live effects' params, as the art styles that name them give them.
 serde_json = { workspace = true }
 # DanCard fork: fast byte searches in editing copies hundreds of MB long.
@@ -34,3 +36,5 @@ memchr = "2"
 
 [dev-dependencies]
 vectorcraft-testkit = { workspace = true }
+# Tests: a Group 4 encoder and the T.4 run codes, to write CCITT test images.
+fax = "0.2"

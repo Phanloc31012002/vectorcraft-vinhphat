@@ -7,7 +7,7 @@
 //! có mực K), không qua RGB.
 
 use serde_json::{Value, json};
-use vectorcraft_doc::{Document, ImageBlob, ImageObject, Node, NodeId, NodeKind, RasterEffectsSettings, Scaling};
+use vectorcraft_doc::{ColorMode, Document, ImageBlob, ImageObject, Node, NodeId, NodeKind, RasterColorModel, RasterEffectsSettings, Scaling};
 use vectorcraft_geom::{Affine, Rect};
 use vectorcraft_render::RenderOptions;
 use vectorcraft_render::encode::{RasterExportOptions, RasterFormat};
@@ -111,6 +111,57 @@ fn covered(pixels: &[u8], w: usize, h: usize) -> bool {
         let rim = x == 0 || y == 0 || x + 1 == w || y + 1 == h;
         p[3] == 255 || (rim && p[3] >= 128)
     })
+}
+
+/// Object › Rasterize của DanCard (`menucmds::rasterize_art_along`): ảnh vẽ dọc theo khung
+/// transform (`followAngle`: card đặt nghiêng thì ảnh nghiêng theo, không dư góc trong suốt), và
+/// tài liệu CMYK giữ mực khi ảnh lấy hệ màu của tài liệu (ảnh phủ kín lưu TIFF CMYK).
+#[derive(Clone, Copy)]
+pub(crate) struct Along {
+    /// Trang → hệ trục của khung (`Affine::IDENTITY`: khung thẳng).
+    to_local: Affine,
+    /// Góc của khung.
+    pub(crate) angle: f64,
+}
+
+impl Along {
+    /// Cho `roots` của `doc` với tham số `p` của Object › Rasterize; `None` khi ảnh đứng thẳng trong
+    /// tài liệu không phải CMYK (Object › Rasterize như VectorCraft làm).
+    pub(crate) fn of(doc: &Document, roots: &[NodeId], p: &Value) -> Option<Self> {
+        let (to_local, angle) = if bool_or(p, "followAngle", false) { super::raster_axes(doc, roots) } else { (Affine::IDENTITY, 0.0) };
+        (to_local != Affine::IDENTITY || doc.color_mode == ColorMode::Cmyk).then_some(Self { to_local, angle })
+    }
+
+    /// Ảnh của `nodes` (của `doc`, theo thứ tự vẽ) phủ `region` (đo trong hệ trục của khung) ở
+    /// `ppi`, hệ màu `color`, kèm lời báo khi có ảnh trong đó không giải mã được.
+    pub(crate) fn render(
+        &self,
+        doc: &Document,
+        nodes: Vec<Node>,
+        region: Rect,
+        ppi: f64,
+        opts: &RenderOptions,
+        color: RasterColorModel,
+    ) -> Result<(Raster, Option<&'static str>)> {
+        let inks = doc.color_mode == ColorMode::Cmyk && color == RasterColorModel::Document;
+        let finish = RasterEffectsSettings { color_model: color, ..Default::default() };
+        let failed = vectorcraft_render::decode_failures();
+        let r = render_raster(doc, nodes, region, self.to_local, ppi, Fit::Grow, opts, &finish, inks)?;
+        Ok((r, crate::cmd::rasterfx::undecoded_warning(failed)))
+    }
+}
+
+/// Phần `n` vẽ ra (`vectorcraft_render::drawn_bounds`: tính cả hiệu ứng hình học) trong hệ trục
+/// của khung `along`.
+pub(crate) fn drawn_bounds_along(doc: &Document, n: &Node, along: Option<Along>) -> Option<Rect> {
+    match along.filter(|a| a.to_local != Affine::IDENTITY) {
+        None => vectorcraft_render::drawn_bounds(doc, n),
+        Some(a) => {
+            let mut probe = n.clone();
+            probe.transform(a.to_local, Scaling { strokes: true, patterns: true, ..Scaling::default() });
+            vectorcraft_render::drawn_bounds(doc, &probe)
+        }
+    }
 }
 
 /// Ảnh `r` thành node mới của `d` (ảnh nhúng), cùng tên và góc khung với object nó thay.

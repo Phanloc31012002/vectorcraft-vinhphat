@@ -92,7 +92,7 @@ pub(crate) struct Backdrop {
 
 /// `key` without what only the view changes: the art it shows.
 fn art(key: &CacheKey) -> CacheKey {
-    CacheKey { interacting: false, zoom: 0.0, cx: 0.0, cy: 0.0, w: 0, h: 0, ppp: 0.0, rot: 0.0, pixel: None, ..key.clone() }
+    CacheKey { interacting: false, dragging: false, zoom: 0.0, cx: 0.0, cy: 0.0, w: 0, h: 0, ppp: 0.0, rot: 0.0, pixel: None, ..key.clone() }
 }
 
 impl Backdrop {
@@ -431,6 +431,7 @@ mod tests {
             doc,
             revision,
             interacting: false,
+            dragging: false,
             zoom: 1.0,
             cx: 150.0,
             cy: 100.0,
@@ -443,6 +444,7 @@ mod tests {
             hidden: vec![],
             rot: 0.0,
             anti_alias: true,
+            highlight_alternate_glyphs: false,
             placed: 0,
             pixel: None,
             smooth_images: true,

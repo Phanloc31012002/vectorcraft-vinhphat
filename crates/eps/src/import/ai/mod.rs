@@ -33,7 +33,7 @@ use super::lex::find;
 use crate::ps;
 
 pub(crate) use frames::text_frames;
-pub use read::{Structure, artboards, read};
+pub use read::{Structure, artboards, read, variables};
 // DanCard fork: the editing data read past what it can't draw yet (opacity masks).
 pub(crate) use read::read_trusting;
 pub(crate) use read::{slot_frame, slot_of};

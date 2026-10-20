@@ -38,7 +38,7 @@ mod scene;
 mod tiff;
 
 pub use import::{
-    EditingRead, Imported, ai_alone, ai_alone_trusting, family_style, import, import_trusting, import_with, is_loss, layered_ai, layered_from,
+    EditingRead, Imported, ai_alone, ai_alone_trusting, family_style, import, import_trusting, import_with, is_loss, layered_ai, layered_from, page,
     read_editing,
 };
 pub use legacy_ai::{HiddenObjects, LegacyAiOptions, LegacyAiOutput, export_legacy_ai};

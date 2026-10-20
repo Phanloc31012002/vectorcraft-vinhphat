@@ -32,7 +32,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             "DanCard: Auto Save PDF",
             [],
             None,
-            "{prefix?: mã (mặc định 1088), start?: STT bắt đầu (1), pad?: đệm số 0 (0–8), boxes?: số hộp, nhiều số ngăn bằng dấu phẩy (\"100, 200\"), boxesInOrder?: bool (mỗi con một số hộp theo thứ tự; mặc định mỗi con × mỗi số), note?: ghi chú thêm vào tên, lamination?: cm|km (cán màng / không màng), date?: ngày đặt in, folder: thư mục lưu (phải có sẵn), dryRun?: bool (chỉ trả danh sách tên file)} lưu mỗi con card đang chọn thành PDF riêng (hàng: trái = trước, phải = sau; 1 mặt: 1 trang, 2 mặt: 2 trang, trang đúng khung clip), không sửa tài liệu, không ghi đè file có sẵn → {message, files: [tên], saved, oneSide, twoSides}",
+            "{prefix?: mã (mặc định 1088), start?: STT bắt đầu (1), pad?: đệm số 0 (0–8), boxes?: số hộp (nhiều số thì ngăn bằng dấu phẩy, vd. \"100, 200\"), boxesInOrder?: bool (mỗi con một số hộp theo thứ tự; mặc định mỗi con × mỗi số), note?: ghi chú thêm vào tên, lamination?: cm|km (cán màng / không màng), date?: ngày đặt in, folder: thư mục lưu (phải có sẵn), dryRun?: bool (chỉ trả danh sách tên file)} lưu mỗi con card đang chọn thành PDF riêng (hàng: trái = trước, phải = sau; 1 mặt: 1 trang, 2 mặt: 2 trang, trang đúng khung clip), không sửa tài liệu, không ghi đè file có sẵn → {message, files: [tên], saved, oneSide, twoSides}",
             has_selection,
             auto_save_pdf
         ),

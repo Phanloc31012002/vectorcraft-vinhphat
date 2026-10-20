@@ -51,6 +51,10 @@ pub(super) fn read_trusted(bytes: &[u8], opts: &LoadOptions, editor_document: bo
     if !read || vectorcraft_pdf::has_image_boxes(&doc) {
         return None;
     }
+    // As `through_editing_data`: the notes on outlines only while the document holds some.
+    if !vectorcraft_pdf::holds_outlines(&doc) {
+        warnings.retain(|w| !vectorcraft_pdf::is_outlines_note(w));
+    }
     crate::cmd::dancard::note_kept_groups(&mut warnings);
     // The layers hold the art that the PDF part leaves out (as `through_editing_data`).
     warnings.retain(|w| w != vectorcraft_pdf::OFF_ARTBOARD_NOTE && w != vectorcraft_pdf::PAST_PAGE_NOTE);
@@ -143,7 +147,7 @@ mod tests {
         let mut s = Session::new();
         let r = open(&mut s, &card(300.0));
         let doc = &s.doc().unwrap().doc;
-        assert!(r.to_string().contains("different page"), "{r}");
+        assert!(r.to_string().contains("not the file's 200 × 100 pt page"), "{r}");
         assert_eq!(images(doc), [((2, 2), PIXELS.to_vec())], "{r}");
     }
 }

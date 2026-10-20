@@ -46,7 +46,7 @@ mod tutro;
 mod varexport;
 #[path = "dancard_variable.rs"]
 mod variable;
-pub(crate) use raster::{Fit, image_node, render_raster};
+pub(crate) use raster::{Along, drawn_bounds_along};
 
 /// Số point trong 1 cm.
 const PT_PER_CM: f64 = 72.0 / 2.54;
@@ -673,19 +673,6 @@ pub(crate) fn raster_axes(d: &Document, ids: &[NodeId]) -> (Affine, f64) {
     }
 }
 
-/// Hộp nhìn thấy của `ids` (viền tính cả, như Object › Rasterize đo) trong hệ trục `to_local`.
-pub(crate) fn local_bounds(d: &Document, ids: &[NodeId], to_local: Affine) -> Option<Rect> {
-    if to_local == Affine::IDENTITY {
-        return d.bounds_of(ids, true);
-    }
-    let symbols = d.symbol_boxes();
-    ids.iter().filter_map(|id| d.node(*id)).fold(None, |acc, n| {
-        let mut probe = n.clone();
-        probe.transform(to_local, vectorcraft_doc::Scaling { strokes: true, patterns: true, ..Default::default() });
-        vectorcraft_geom::union_opt(acc, probe.visual_bounds_with(&symbols))
-    })
-}
-
 /// Khung của cả vùng chọn: đúng bảng Transform; riêng khi mọi object cùng một góc dò được thì
 /// khung xoay theo góc đó và ôm hết chúng.
 fn selection_frame(d: &Document, ids: &[NodeId], each: &[Frame], visual: bool) -> Option<Frame> {
@@ -749,7 +736,8 @@ fn transform_info(s: &mut Session, p: &Value) -> Result<Value> {
         Some(other) => return Err(bad(C, format!("bounds phải là preview hoặc geometric, không phải {other}"))),
     };
     let given = p.get("ids").is_some();
-    let ids = if given { checked_ids_param(s, p, "ids", C)? } else { roots_in_paint_order(s)? };
+    // `ids` như vùng chọn: object đưa vào cùng group chứa nó thì chỉ đo group.
+    let ids = checked_ids_or_selection(s, p, C)?;
     let st = s.doc()?;
     let d = &st.doc;
     // Vùng chọn đo đúng các object bảng Transform đo.
